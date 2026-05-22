@@ -1,3 +1,4 @@
 /target
 data
 .specstory
+Cargo.lock
