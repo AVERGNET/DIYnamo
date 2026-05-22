@@ -15,6 +15,10 @@ path = "src/bin/cli.rs"
 name = "server"
 path = "src/bin/server.rs"
 
+[[bin]]
+name = "gossip"
+path = "src/bin/gossip.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 bincode = "1"
@@ -24,4 +28,6 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+memberlist = { version = "0.8.2", default-features = false, features = ["tcp", "tokio", "crc32"] }
+smol_str = "0.3.6"
