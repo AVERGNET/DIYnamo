@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
+bincode = "1"
 rocksdb = "0.24.0"
+serde = { version = "1.0.228", features = ["derive"] }

@@ -1,13 +1,24 @@
-use rocksdb::{Options, DB};
+mod store;
 
-fn main() -> Result<(), rocksdb::Error> {
-    let path = "./data/db";
-    let db = DB::open_default(path)?;
+use std::sync::Arc;
 
-    db.put(b"my-key", b"my-value")?;
-    match db.get(b"my-key")? {
-        Some(value) => println!("value: {:?}", value),
-        None => println!("key not found"),
-    }
+use store::rocksdb_store::RocksDbStore;
+use store::timestamp::SystemTimestamp;
+use store::{StoreConfig, StorageEngine};
+
+fn main() -> anyhow::Result<()> {
+    let config = StoreConfig {
+        path: "./data/db".into(),
+        create_if_missing: true,
+    };
+
+    let store: Arc<dyn StorageEngine> = Arc::new(
+        RocksDbStore::open(config, Box::new(SystemTimestamp))?,
+    );
+
+    // Hand `store` to the HTTP layer here. The HTTP layer receives
+    // Arc<dyn StorageEngine> and never imports anything from store::rocksdb_store.
+    let _ = store;
+
     Ok(())
 }
