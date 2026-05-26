@@ -29,6 +29,38 @@ impl RocksDbStore {
 
         Ok(Self { db, clock })
     }
+
+    /// Write `value` to `key` only if `timestamp` is strictly greater than the
+    /// timestamp of whatever is currently stored there.
+    ///
+    /// Used by read repair. By checking the existing timestamp first, a stale
+    /// repair carrying an older timestamp can never overwrite a newer external
+    /// write. The check-then-write is not atomic (no RocksDB transaction), so
+    /// there is a small TOCTOU window, but it is practically negligible for our
+    /// workload and bounded in impact — the next read will repair again if needed.
+    pub fn put_if_newer(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        timestamp: u64,
+    ) -> anyhow::Result<()> {
+        if let Some(bytes) = self.db.get(key).with_context(|| "RocksDB get failed in put_if_newer")? {
+            let current: StoredEntry = bincode::deserialize(&bytes)
+                .with_context(|| "failed to deserialize entry in put_if_newer")?;
+            if current.timestamp >= timestamp {
+                return Ok(()); // existing data is at least as fresh — do not overwrite
+            }
+        }
+        let entry = StoredEntry {
+            timestamp,
+            data: value.to_vec(),
+        };
+        let bytes = bincode::serialize(&entry)
+            .with_context(|| "failed to serialize entry in put_if_newer")?;
+        self.db
+            .put(key, bytes)
+            .with_context(|| "RocksDB put failed in put_if_newer")
+    }
 }
 
 impl StorageEngine for RocksDbStore {

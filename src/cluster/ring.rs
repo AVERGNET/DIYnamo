@@ -50,8 +50,10 @@ impl CoordinatorRing {
             .map(|m| (m.id.clone(), m))
             .collect();
 
-        // replicas = n - 1 so ring.get(key) returns n nodes (1 primary + n-1 replicas).
-        let mut ring = HashRing::new(n - 1, RING_VNODES);
+        // Build with all roster members as replicas so ring.get(key) always returns
+        // the full roster in ring order. preference_list_for_key truncates to n;
+        // ring_order_for_key exposes the remainder as hint candidates.
+        let mut ring = HashRing::new(roster.len() - 1, RING_VNODES);
         let nodes: Vec<RingNode> = members_by_id
             .keys()
             .map(|id| RingNode { id: id.clone() })
@@ -79,6 +81,26 @@ impl CoordinatorRing {
         owners
             .iter()
             .take(n)
+            .map(|node| {
+                self.members_by_id
+                    .get(&node.id)
+                    .with_context(|| format!("ring node '{}' missing from roster", node.id))
+            })
+            .collect()
+    }
+
+    /// All roster nodes in ring order for this key, no truncation.
+    ///
+    /// `result[..n]` is the preference list; `result[n..]` are the hint candidates
+    /// (nodes beyond the N preferred positions, in ring order).
+    pub fn ring_order_for_key(&self, key: &[u8]) -> Result<Vec<&MemberInfo>> {
+        let key_str = std::str::from_utf8(key).context("key must be valid UTF-8")?;
+        let owners = self.ring.get(&key_str);
+        if owners.is_empty() {
+            bail!("hash ring returned no nodes for key");
+        }
+        owners
+            .iter()
             .map(|node| {
                 self.members_by_id
                     .get(&node.id)
@@ -154,5 +176,31 @@ mod tests {
     fn from_roster_rejects_smaller_than_n() {
         let roster = vec![member("n1", 7946, 8081), member("n2", 7947, 8082)];
         assert!(CoordinatorRing::from_roster(&roster, 3).is_err());
+    }
+
+    #[test]
+    fn ring_order_returns_all_nodes_and_pref_list_is_prefix() {
+        let roster = vec![
+            member("n1", 7946, 8081),
+            member("n2", 7947, 8082),
+            member("n3", 7948, 8083),
+            member("n4", 7949, 8084),
+            member("n5", 7950, 8085),
+        ];
+        let ring = CoordinatorRing::from_roster(&roster, 3).unwrap();
+        let order = ring.ring_order_for_key(b"apple").unwrap();
+        let plist = ring.preference_list_for_key(b"apple", 3).unwrap();
+
+        // ring_order returns all 5 nodes
+        assert_eq!(order.len(), 5);
+        // first 3 of ring_order match the preference list exactly
+        let order_ids: Vec<_> = order.iter().map(|m| &m.id).collect();
+        let plist_ids: Vec<_> = plist.iter().map(|m| &m.id).collect();
+        assert_eq!(&order_ids[..3], plist_ids.as_slice());
+        // hint candidates are the remaining 2, all distinct from pref list
+        let pref_set: std::collections::HashSet<_> = plist_ids.iter().collect();
+        for hint_candidate in &order_ids[3..] {
+            assert!(!pref_set.contains(hint_candidate));
+        }
     }
 }

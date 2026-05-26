@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use tokio::task::JoinSet;
+
 use crate::client::KvClient;
 use crate::cluster::ring::CoordinatorRing;
 use crate::cluster::GossipNode;
@@ -8,21 +11,34 @@ use crate::config::ClusterMember;
 use crate::store::rocksdb_store::RocksDbStore;
 use crate::store::{HintStore, StorageEngine, VersionedValue};
 
-/// Owner is in the ring but gossip reports it as unreachable.
+/// Returned when a quorum of acks (real writes + hints) could not be reached.
 #[derive(Debug)]
-pub struct OwnerUnavailable {
-    pub owner_id: String,
+pub struct QuorumFailed {
+    pub acks: usize,
+    pub required: usize,
 }
 
-impl std::fmt::Display for OwnerUnavailable {
+impl std::fmt::Display for QuorumFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "owner {} is not available", self.owner_id)
+        write!(
+            f,
+            "quorum failed: got {}/{} acks",
+            self.acks, self.required
+        )
     }
 }
 
-impl std::error::Error for OwnerUnavailable {}
+impl std::error::Error for QuorumFailed {}
 
-/// Coordinates KV operations: hash-ring owner lookup, forward to peers via internal HTTP.
+/// Coordinates KV operations across the cluster.
+///
+/// `put` — sloppy-quorum writes: attempt all N preferred nodes in parallel,
+/// supplement failures with hinted writes on extra ring nodes; succeed if
+/// real_writes + hints >= W.
+///
+/// `get` — quorum reads with LWW and read repair: read all N preferred nodes
+/// in parallel, require at least R successful responses, pick the
+/// highest-timestamp winner, fire-and-forget repairs to stale replicas.
 pub struct ReplicatedStore {
     pub local: Arc<RocksDbStore>,
     pub gossip: Arc<GossipNode>,
@@ -57,57 +73,189 @@ impl ReplicatedStore {
             r,
         })
     }
-
-    async fn is_online(&self, node_id: &str) -> bool {
-        self.gossip
-            .online_members()
-            .await
-            .iter()
-            .any(|m| m.id == node_id)
-    }
 }
 
 impl StorageEngine for ReplicatedStore {
     async fn get(&self, key: &[u8]) -> Result<Option<VersionedValue>> {
-        let plist = self.ring.preference_list_for_key(key, self.n)?;
-        let owner = plist
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("preference list is empty"))?;
+        let pref_list = self.ring.preference_list_for_key(key, self.n)?;
 
-        if owner.id == self.self_id {
-            return self.local.get(key).await;
+        // --- Phase 1: parallel reads from all N preferred nodes ---
+        // Each task returns the node's base URL and its read result.
+        // Ok(None)  = node responded, key absent (counts toward quorum, repair candidate)
+        // Ok(Some)  = node responded, key present
+        // Err       = timeout or network failure (does not count toward quorum)
+        let mut js: JoinSet<(String, Result<Option<VersionedValue>>)> = JoinSet::new();
+
+        for member in &pref_list {
+            let url = member.internal_base_url();
+            if member.id == self.self_id {
+                let local = Arc::clone(&self.local);
+                let k = key.to_vec();
+                js.spawn(async move { (url, local.get(&k).await) });
+            } else {
+                let k = key.to_vec();
+                js.spawn(async move {
+                    let r = async {
+                        let client = KvClient::new(&url)?;
+                        client.get_internal_versioned(&k).await
+                    }
+                    .await;
+                    (url, r)
+                });
+            }
         }
 
-        if !self.is_online(&owner.id).await {
-            return Err(anyhow!(OwnerUnavailable {
-                owner_id: owner.id.clone(),
+        // Collect successful responses; discard errors (timeout / unreachable).
+        let mut responses: Vec<(String, Option<VersionedValue>)> = Vec::new();
+        while let Some(join_res) = js.join_next().await {
+            if let Ok((url, Ok(opt))) = join_res {
+                responses.push((url, opt));
+            }
+        }
+
+        // --- Phase 2: quorum check ---
+        if responses.len() < self.r {
+            return Err(anyhow::anyhow!(QuorumFailed {
+                acks: responses.len(),
+                required: self.r,
             }));
         }
 
-        let client = KvClient::new(owner.internal_base_url())?;
-        let versioned = client.get_internal_versioned(key).await?;
-        Ok(Some(versioned))
+        // --- Phase 3: LWW — pick the Some response with the highest timestamp ---
+        let winner: Option<VersionedValue> = responses
+            .iter()
+            .filter_map(|(_, opt)| opt.as_ref())
+            .max_by_key(|v| v.timestamp)
+            .cloned();
+
+        // --- Phase 4: read repair (fire-and-forget) ---
+        // Push the winner to any replica that responded with missing or stale data.
+        // Uses put_internal_versioned_bytes which maps to put_if_newer on the
+        // receiving node: the write only lands if no fresher data has arrived
+        // since the read was issued. This prevents a delayed repair from
+        // overwriting a concurrent external write with a newer timestamp.
+        // Only nodes that actually responded are repaired; unreachable nodes are
+        // left for hinted handoff / reconciliation.
+        if let Some(ref winner_val) = winner {
+            let winner_ts = winner_val.timestamp;
+            let repair_data = winner_val.data.clone();
+            let k = key.to_vec();
+
+            for (url, opt) in &responses {
+                let needs_repair = match opt {
+                    None => true,
+                    Some(v) => v.timestamp < winner_ts,
+                };
+                if needs_repair {
+                    let url = url.clone();
+                    let k = k.clone();
+                    let data = repair_data.clone();
+                    tokio::spawn(async move {
+                        if let Ok(client) = KvClient::new(&url) {
+                            let _ = client
+                                .put_internal_versioned_bytes(&k, &data, winner_ts)
+                                .await;
+                        }
+                    });
+                }
+            }
+        }
+
+        Ok(winner)
     }
 
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let plist = self.ring.preference_list_for_key(key, self.n)?;
-        let owner = plist
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("preference list is empty"))?;
+        let all_in_order = self.ring.ring_order_for_key(key)?;
+        let pref_list = &all_in_order[..self.n];
+        let hint_candidates = &all_in_order[self.n..];
 
-        if owner.id == self.self_id {
-            return self.local.put(key, value).await;
+        // Build a set of preferred node IDs for O(1) exclusion when scanning candidates.
+        let pref_ids: HashSet<&str> = pref_list.iter().map(|m| m.id.as_str()).collect();
+
+        // --- Phase 1: parallel writes to all N preferred nodes ---
+        // Each task returns (node_id, Result<()>). A timed-out or errored write
+        // is treated as a failure; the 1s timeout is baked into KvClient.
+        let mut js: JoinSet<(String, Result<()>)> = JoinSet::new();
+
+        for member in pref_list {
+            let node_id = member.id.clone();
+            if member.id == self.self_id {
+                let local = Arc::clone(&self.local);
+                let k = key.to_vec();
+                let v = value.to_vec();
+                js.spawn(async move {
+                    let r = local.put(&k, &v).await;
+                    (node_id, r)
+                });
+            } else {
+                let url = member.internal_base_url();
+                let k = key.to_vec();
+                let v = value.to_vec();
+                js.spawn(async move {
+                    let r = async {
+                        let client = KvClient::new(&url)?;
+                        client.put_internal_bytes(&k, &v).await
+                    }
+                    .await;
+                    (node_id, r)
+                });
+            }
         }
 
-        if !self.is_online(&owner.id).await {
-            return Err(anyhow!(OwnerUnavailable {
-                owner_id: owner.id.clone(),
-            }));
+        let mut real_acks: usize = 0;
+        let mut failed_node_ids: Vec<String> = Vec::new();
+
+        while let Some(join_res) = js.join_next().await {
+            match join_res {
+                Ok((_node_id, Ok(()))) => real_acks += 1,
+                Ok((node_id, Err(_))) => failed_node_ids.push(node_id),
+                Err(_) => {} // task panicked — count as failure, node_id unknown
+            }
         }
 
-        let client = KvClient::new(owner.internal_base_url())?;
-        client.put_internal_bytes(key, value).await
+        // --- Phase 2: hinted handoff for failed preferred writes ---
+        // Walk hint candidates in ring order. For each failed preferred node,
+        // try candidates sequentially until one accepts the hint write.
+        // A single candidate_idx cursor advances across all failure slots so
+        // each candidate is tried at most once across the whole Phase 2.
+        let mut candidate_idx = 0;
+        let mut hint_acks: usize = 0;
+
+        'slots: for target_id in &failed_node_ids {
+            while candidate_idx < hint_candidates.len() {
+                let candidate = hint_candidates[candidate_idx];
+                candidate_idx += 1;
+
+                // Candidates beyond the preference list should never be in pref_ids,
+                // but guard defensively against ring implementations that might repeat nodes.
+                if pref_ids.contains(candidate.id.as_str()) {
+                    continue;
+                }
+
+                let url = candidate.internal_base_url();
+                let result = async {
+                    let client = KvClient::new(&url)?;
+                    client.put_hint_bytes(target_id, key, value).await
+                }
+                .await;
+
+                if result.is_ok() {
+                    hint_acks += 1;
+                    continue 'slots;
+                }
+                // candidate failed — try the next one for this same slot
+            }
+            // no candidates left; this slot goes unacknowledged
+        }
+
+        let acks = real_acks + hint_acks;
+        if acks >= self.w {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(QuorumFailed {
+                acks,
+                required: self.w,
+            }))
+        }
     }
 }
