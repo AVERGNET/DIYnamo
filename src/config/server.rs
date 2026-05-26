@@ -26,7 +26,17 @@ pub struct ClusterMember {
     pub forward_port: u16,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+fn default_n() -> usize {
+    3
+}
+fn default_w() -> usize {
+    2
+}
+fn default_r() -> usize {
+    2
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClusterSection {
     #[serde(default)]
     pub join: Vec<SocketAddr>,
@@ -34,6 +44,25 @@ pub struct ClusterSection {
     pub members: Vec<ClusterMember>,
     #[serde(default)]
     pub seeds: Vec<String>,
+    #[serde(default = "default_n")]
+    pub n: usize,
+    #[serde(default = "default_w")]
+    pub w: usize,
+    #[serde(default = "default_r")]
+    pub r: usize,
+}
+
+impl Default for ClusterSection {
+    fn default() -> Self {
+        Self {
+            join: Vec::new(),
+            members: Vec::new(),
+            seeds: Vec::new(),
+            n: default_n(),
+            w: default_w(),
+            r: default_r(),
+        }
+    }
 }
 
 /// Fully resolved settings used to start the server.
@@ -46,6 +75,9 @@ pub struct ResolvedServerConfig {
     pub join: Vec<SocketAddr>,
     pub cluster_members: Vec<ClusterMember>,
     pub seeds: Vec<String>,
+    pub n: usize,
+    pub w: usize,
+    pub r: usize,
 }
 
 impl From<ServerConfigFile> for ResolvedServerConfig {
@@ -58,6 +90,9 @@ impl From<ServerConfigFile> for ResolvedServerConfig {
             join: file.cluster.join,
             cluster_members: file.cluster.members,
             seeds: file.cluster.seeds,
+            n: file.cluster.n,
+            w: file.cluster.w,
+            r: file.cluster.r,
         }
     }
 }
@@ -72,6 +107,9 @@ impl Default for ResolvedServerConfig {
             join: Vec::new(),
             cluster_members: Vec::new(),
             seeds: Vec::new(),
+            n: default_n(),
+            w: default_w(),
+            r: default_r(),
         }
     }
 }

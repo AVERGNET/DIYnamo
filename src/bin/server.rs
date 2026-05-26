@@ -12,7 +12,7 @@ use diynamo::config::resolve;
 use diynamo::coordinator::{OwnerUnavailable, ReplicatedStore};
 use diynamo::store::rocksdb_store::RocksDbStore;
 use diynamo::store::timestamp::SystemTimestamp;
-use diynamo::store::{StoreConfig, StorageEngine};
+use diynamo::store::{HintStore, StoreConfig, StorageEngine};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,7 +101,10 @@ async fn get_kv(
         Some(v) => {
             let value =
                 String::from_utf8(v.data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(Json(GetResponse { value }))
+            Ok(Json(GetResponse {
+                value,
+                timestamp: v.timestamp,
+            }))
         }
         None => Err(StatusCode::NOT_FOUND),
     }
@@ -134,7 +137,10 @@ async fn get_kv_internal(
         Some(v) => {
             let value =
                 String::from_utf8(v.data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(Json(GetResponse { value }))
+            Ok(Json(GetResponse {
+                value,
+                timestamp: v.timestamp,
+            }))
         }
         None => Err(StatusCode::NOT_FOUND),
     }
@@ -165,6 +171,9 @@ async fn main() -> Result<()> {
     };
     let local = Arc::new(RocksDbStore::open(store_config, Box::new(SystemTimestamp))?);
 
+    let hints_path = PathBuf::from(&cfg.data_dir).join("hints");
+    let hints = Arc::new(HintStore::open(&hints_path)?);
+
     let gossip = GossipNode::start(&cfg.node_id, cfg.gossip_bind, &cfg.join).await?;
     tokio::spawn(run_live_set_printer(gossip.clone(), Duration::from_secs(1)));
 
@@ -172,8 +181,12 @@ async fn main() -> Result<()> {
     let store = Arc::new(ReplicatedStore::new(
         local.clone(),
         gossip,
+        hints,
         cfg.node_id.clone(),
         cfg.cluster_members,
+        cfg.n,
+        cfg.w,
+        cfg.r,
     )?);
     let state = AppState { store, local };
 

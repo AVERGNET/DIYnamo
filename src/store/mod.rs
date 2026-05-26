@@ -1,5 +1,8 @@
+pub mod hints;
 pub mod rocksdb_store;
 pub mod timestamp;
+
+pub use hints::HintStore;
 
 use std::path::PathBuf;
 

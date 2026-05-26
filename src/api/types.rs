@@ -6,8 +6,9 @@ pub struct PutBody {
     pub value: String,
 }
 
-/// JSON body for `GET /kv/{key}`.
+/// JSON body for `GET /kv/{key}` and `GET /internal/kv/{key}`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetResponse {
     pub value: String,
+    pub timestamp: u64,
 }

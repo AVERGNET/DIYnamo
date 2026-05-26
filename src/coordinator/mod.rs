@@ -6,7 +6,7 @@ use crate::cluster::ring::CoordinatorRing;
 use crate::cluster::GossipNode;
 use crate::config::ClusterMember;
 use crate::store::rocksdb_store::RocksDbStore;
-use crate::store::{StorageEngine, VersionedValue};
+use crate::store::{HintStore, StorageEngine, VersionedValue};
 
 /// Owner is in the ring but gossip reports it as unreachable.
 #[derive(Debug)]
@@ -26,23 +26,35 @@ impl std::error::Error for OwnerUnavailable {}
 pub struct ReplicatedStore {
     pub local: Arc<RocksDbStore>,
     pub gossip: Arc<GossipNode>,
+    pub hints: Arc<HintStore>,
     self_id: String,
     ring: CoordinatorRing,
+    pub n: usize,
+    pub w: usize,
+    pub r: usize,
 }
 
 impl ReplicatedStore {
     pub fn new(
         local: Arc<RocksDbStore>,
         gossip: Arc<GossipNode>,
+        hints: Arc<HintStore>,
         self_id: String,
         roster: Vec<ClusterMember>,
+        n: usize,
+        w: usize,
+        r: usize,
     ) -> anyhow::Result<Self> {
-        let ring = CoordinatorRing::from_roster(&roster)?;
+        let ring = CoordinatorRing::from_roster(&roster, n)?;
         Ok(Self {
             local,
             gossip,
+            hints,
             self_id,
             ring,
+            n,
+            w,
+            r,
         })
     }
 
@@ -57,7 +69,11 @@ impl ReplicatedStore {
 
 impl StorageEngine for ReplicatedStore {
     async fn get(&self, key: &[u8]) -> Result<Option<VersionedValue>> {
-        let owner = self.ring.owner_for_key(key)?;
+        let plist = self.ring.preference_list_for_key(key, self.n)?;
+        let owner = plist
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("preference list is empty"))?;
 
         if owner.id == self.self_id {
             return self.local.get(key).await;
@@ -70,15 +86,16 @@ impl StorageEngine for ReplicatedStore {
         }
 
         let client = KvClient::new(owner.internal_base_url())?;
-        let text = client.get_internal_bytes(key).await?;
-        Ok(Some(VersionedValue {
-            timestamp: 0,
-            data: text.into_bytes(),
-        }))
+        let versioned = client.get_internal_versioned(key).await?;
+        Ok(Some(versioned))
     }
 
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let owner = self.ring.owner_for_key(key)?;
+        let plist = self.ring.preference_list_for_key(key, self.n)?;
+        let owner = plist
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("preference list is empty"))?;
 
         if owner.id == self.self_id {
             return self.local.put(key, value).await;
@@ -93,5 +110,4 @@ impl StorageEngine for ReplicatedStore {
         let client = KvClient::new(owner.internal_base_url())?;
         client.put_internal_bytes(key, value).await
     }
-
 }

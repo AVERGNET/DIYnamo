@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::StatusCode;
 
 use crate::api::types::{GetResponse, PutBody};
+use crate::store::VersionedValue;
 
 /// HTTP client for a single node's KV HTTP API.
 #[derive(Clone)]
@@ -95,8 +96,9 @@ impl KvClient {
         }
     }
 
-    /// Local-only get via `/internal/kv/{key}`.
-    pub async fn get_internal_bytes(&self, key: &[u8]) -> Result<String> {
+    /// Local-only get via `/internal/kv/{key}`. Returns a `VersionedValue` so
+    /// callers have access to the stored timestamp for LWW comparison.
+    pub async fn get_internal_versioned(&self, key: &[u8]) -> Result<VersionedValue> {
         let key = std::str::from_utf8(key).context("key must be UTF-8")?;
         let response = self
             .http
@@ -111,7 +113,10 @@ impl KvClient {
                     .json()
                     .await
                     .context("failed to decode internal get response")?;
-                Ok(body.value)
+                Ok(VersionedValue {
+                    timestamp: body.timestamp,
+                    data: body.value.into_bytes(),
+                })
             }
             StatusCode::NOT_FOUND => bail!("key not found: {key}"),
             status => bail!(
