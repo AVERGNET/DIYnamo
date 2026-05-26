@@ -7,39 +7,45 @@ use axum::{
 };
 use clap::Parser;
 use diynamo::api::types::{GetResponse, PutBody};
-use diynamo::cluster::GossipNode;
+use diynamo::cluster::{run_live_set_printer, GossipNode};
+use diynamo::config::resolve;
 use diynamo::coordinator::ReplicatedStore;
 use diynamo::store::rocksdb_store::RocksDbStore;
 use diynamo::store::timestamp::SystemTimestamp;
 use diynamo::store::{StoreConfig, StorageEngine};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone)]
 struct AppState {
     store: Arc<ReplicatedStore>,
 }
 
+/// CLI arguments. Values from the config file are overridden when the same flag is set.
 #[derive(Parser)]
 #[command(name = "diynamo-server", about = "DIYnamo KV HTTP server")]
-struct Args {
-    #[arg(long, default_value = "8080")]
-    port: u16,
+struct CliArgs {
+    /// Path to TOML config (e.g. config/node1.toml)
+    #[arg(long, short = 'c')]
+    config: Option<PathBuf>,
 
-    #[arg(long, default_value = "./data/db")]
-    data_dir: String,
+    #[arg(long)]
+    port: Option<u16>,
 
-    /// Unique node name in the cluster
-    #[arg(long, default_value = "node0")]
-    node_id: String,
+    #[arg(long)]
+    data_dir: Option<String>,
 
-    /// Gossip bind address (memberlist TCP/UDP), e.g. 127.0.0.1:7946
-    #[arg(long, default_value = "127.0.0.1:7946")]
-    gossip_bind: SocketAddr,
+    #[arg(long)]
+    node_id: Option<String>,
 
-    /// Seed node(s) to join (repeat flag or comma-separated). Omit on the first node.
+    #[arg(long)]
+    gossip_bind: Option<SocketAddr>,
+
+    /// Seed gossip address(es). Overrides config join list when set.
     #[arg(long = "join", value_delimiter = ',')]
-    join: Vec<SocketAddr>,
+    join: Option<Vec<SocketAddr>>,
 }
 
 async fn put_kv(
@@ -77,21 +83,31 @@ async fn get_kv(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
-    let data_dir = args.data_dir.clone();
+    let cli = CliArgs::parse();
+    let cfg = resolve(
+        cli.config.as_deref(),
+        cli.port,
+        cli.data_dir,
+        cli.node_id,
+        cli.gossip_bind,
+        cli.join,
+    )?;
 
-    let config = StoreConfig {
-        path: args.data_dir.into(),
+    let data_dir = cfg.data_dir.clone();
+
+    let store_config = StoreConfig {
+        path: cfg.data_dir.clone().into(),
         create_if_missing: true,
     };
-    let local = Arc::new(RocksDbStore::open(config, Box::new(SystemTimestamp))?);
+    let local = Arc::new(RocksDbStore::open(store_config, Box::new(SystemTimestamp))?);
 
-    let gossip = GossipNode::start(&args.node_id, args.gossip_bind, &args.join).await?;
+    let gossip = GossipNode::start(&cfg.node_id, cfg.gossip_bind, &cfg.join).await?;
+    tokio::spawn(run_live_set_printer(gossip.clone(), Duration::from_secs(1)));
 
     let store = Arc::new(ReplicatedStore::new(local, gossip));
     let state = AppState { store };
 
-    let addr = format!("0.0.0.0:{}", args.port);
+    let addr = format!("0.0.0.0:{}", cfg.port);
     let app = Router::new()
         .route("/kv/{key}", get(get_kv).put(put_kv))
         .with_state(state.clone());
@@ -100,8 +116,8 @@ async fn main() -> Result<()> {
     println!("listening on http://{addr}");
     println!("RocksDB data dir: {data_dir}");
     println!(
-        "gossip node_id={} bind={}",
-        args.node_id, args.gossip_bind
+        "gossip node_id={} bind={} join={:?}",
+        cfg.node_id, cfg.gossip_bind, cfg.join
     );
 
     tokio::select! {

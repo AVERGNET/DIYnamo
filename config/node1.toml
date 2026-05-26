@@ -1,0 +1,9 @@
+# Seed node — no join addresses
+[node]
+id = "n1"
+http_port = 8081
+gossip_bind = "127.0.0.1:7946"
+data_dir = "./data/n1"
+
+[cluster]
+join = []

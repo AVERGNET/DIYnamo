@@ -11,9 +11,7 @@ use memberlist::{
 use smol_str::SmolStr;
 use std::{net::SocketAddr, sync::Arc};
 
-type ClusterMemberlist =
-    TokioTcpMemberlist<SmolStr, TokioSocketAddrResolver, VoidDelegate<SmolStr, SocketAddr>>;
-
+type ClusterMemberlist = TokioTcpMemberlist<SmolStr, TokioSocketAddrResolver, VoidDelegate<SmolStr, SocketAddr>>;
 /// Handle to a running memberlist node.
 pub struct GossipNode {
     inner: Arc<ClusterMemberlist>,

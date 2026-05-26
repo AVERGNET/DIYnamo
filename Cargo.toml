@@ -28,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 memberlist = { version = "0.8.2", default-features = false, features = ["tcp", "tokio", "crc32"] }
 smol_str = "0.3.6"

@@ -1,0 +1,8 @@
+[node]
+id = "n2"
+http_port = 8082
+gossip_bind = "127.0.0.1:7947"
+data_dir = "./data/n2"
+
+[cluster]
+join = ["127.0.0.1:7946"]
