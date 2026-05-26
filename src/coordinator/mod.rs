@@ -1,8 +1,10 @@
+pub mod handoff;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::client::KvClient;
 use crate::cluster::ring::CoordinatorRing;
@@ -48,6 +50,7 @@ pub struct ReplicatedStore {
     pub n: usize,
     pub w: usize,
     pub r: usize,
+    _handoff: JoinHandle<()>,
 }
 
 impl ReplicatedStore {
@@ -62,6 +65,19 @@ impl ReplicatedStore {
         r: usize,
     ) -> anyhow::Result<Self> {
         let ring = CoordinatorRing::from_roster(&roster, n)?;
+
+        let events = gossip.subscribe();
+        let handoff_task = handoff::HandoffTask {
+            hints: Arc::clone(&hints),
+            gossip: Arc::clone(&gossip),
+            local: Arc::clone(&local),
+            self_id: self_id.clone(),
+            roster: roster.clone(),
+            n,
+            events,
+        };
+        let _handoff = handoff_task.start();
+
         Ok(Self {
             local,
             gossip,
@@ -71,6 +87,7 @@ impl ReplicatedStore {
             n,
             w,
             r,
+            _handoff,
         })
     }
 }

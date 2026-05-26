@@ -8,6 +8,7 @@ use axum::{
 use clap::Parser;
 use diynamo::api::types::{GetResponse, PutBody, PutVersionedBody};
 use diynamo::cluster::{run_live_set_printer, GossipNode};
+use diynamo::cluster::delegate::NodeMeta;
 use diynamo::config::resolve;
 use diynamo::coordinator::{QuorumFailed, ReplicatedStore};
 use diynamo::store::rocksdb_store::RocksDbStore;
@@ -209,7 +210,11 @@ async fn main() -> Result<()> {
     let hints_path = PathBuf::from(&cfg.data_dir).join("hints");
     let hints = Arc::new(HintStore::open(&hints_path)?);
 
-    let gossip = GossipNode::start(&cfg.node_id, cfg.gossip_bind, &cfg.join).await?;
+    let node_meta = NodeMeta {
+        uuid: uuid::Uuid::new_v4().into_bytes(),
+        http_port: cfg.port,
+    };
+    let gossip = GossipNode::start(&cfg.node_id, cfg.gossip_bind, &cfg.join, node_meta).await?;
     tokio::spawn(run_live_set_printer(gossip.clone(), Duration::from_secs(1)));
 
     let roster_size = cfg.cluster_members.len();

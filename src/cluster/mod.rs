@@ -1,3 +1,4 @@
+pub mod delegate;
 pub mod membership;
 pub mod printer;
 pub mod ring;

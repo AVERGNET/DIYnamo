@@ -33,6 +33,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "tim
 memberlist = { version = "0.8.2", default-features = false, features = ["tcp", "tokio", "crc32"] }
 smol_str = "0.3.6"
 hashring_coordinator = "0.3.3"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

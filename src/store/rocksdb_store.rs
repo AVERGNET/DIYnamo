@@ -1,5 +1,5 @@
 use anyhow::Context;
-use rocksdb::{Options, DB};
+use rocksdb::{IteratorMode, Options, DB};
 use serde::{Deserialize, Serialize};
 
 use super::timestamp::TimestampSource;
@@ -60,6 +60,28 @@ impl RocksDbStore {
         self.db
             .put(key, bytes)
             .with_context(|| "RocksDB put failed in put_if_newer")
+    }
+
+    /// Iterate over every key-value pair in the store.
+    ///
+    /// Used by the handoff task during UUID-change reconciliation: when a node
+    /// restarts (new UUID) we scan all local keys and push any that belong to
+    /// that node's preference list.
+    pub fn iter_all(
+        &self,
+    ) -> impl Iterator<Item = anyhow::Result<(Vec<u8>, VersionedValue)>> + '_ {
+        self.db.iterator(IteratorMode::Start).map(|item| {
+            let (k, v) = item.context("RocksDB iterator error")?;
+            let entry: StoredEntry =
+                bincode::deserialize(&v).context("failed to deserialize entry in iter_all")?;
+            Ok((
+                k.to_vec(),
+                VersionedValue {
+                    timestamp: entry.timestamp,
+                    data: entry.data,
+                },
+            ))
+        })
     }
 }
 

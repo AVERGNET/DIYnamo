@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use diynamo::cluster::{run_live_set_printer, GossipNode};
+use diynamo::cluster::delegate::NodeMeta;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 #[derive(Parser)]
@@ -35,7 +36,11 @@ async fn main() -> Result<()> {
         args.node_id, args.gossip_bind, args.join
     );
 
-    let node = GossipNode::start(&args.node_id, args.gossip_bind, &args.join).await?;
+    let node_meta = NodeMeta {
+        uuid: uuid::Uuid::new_v4().into_bytes(),
+        http_port: 0, // gossip-only binary; no HTTP port
+    };
+    let node = GossipNode::start(&args.node_id, args.gossip_bind, &args.join, node_meta).await?;
 
     let printer_view: Arc<GossipNode> = node.clone();
     let interval = Duration::from_secs(args.print_interval_secs);

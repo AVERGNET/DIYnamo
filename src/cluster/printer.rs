@@ -42,11 +42,13 @@ mod tests {
                 id: "n2".into(),
                 gossip_addr: "127.0.0.1:7947".parse().unwrap(),
                 forward_port: 8082,
+                uuid: [0u8; 16],
             },
             MemberInfo {
                 id: "n1".into(),
                 gossip_addr: "127.0.0.1:7946".parse().unwrap(),
                 forward_port: 8081,
+                uuid: [0u8; 16],
             },
         ];
         let s = format_live_set(&members);

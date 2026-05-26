@@ -8,6 +8,9 @@ pub struct MemberInfo {
     pub id: String,
     pub gossip_addr: SocketAddr,
     pub forward_port: u16,
+    /// Startup UUID gossiped via `NodeMeta`. Zero for roster entries built from
+    /// static config (before gossip meta has been received).
+    pub uuid: [u8; 16],
 }
 
 impl From<ClusterMember> for MemberInfo {
@@ -16,6 +19,7 @@ impl From<ClusterMember> for MemberInfo {
             id: m.id,
             gossip_addr: m.gossip_addr,
             forward_port: m.forward_port,
+            uuid: [0u8; 16],
         }
     }
 }
