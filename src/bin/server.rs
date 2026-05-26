@@ -140,18 +140,6 @@ async fn get_kv_internal(
     }
 }
 
-async fn delete_kv_internal(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .local
-        .delete(key.as_bytes())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = CliArgs::parse();
@@ -186,7 +174,7 @@ async fn main() -> Result<()> {
         gossip,
         cfg.node_id.clone(),
         cfg.cluster_members,
-    ));
+    )?);
     let state = AppState { store, local };
 
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -194,9 +182,7 @@ async fn main() -> Result<()> {
         .route("/kv/{key}", get(get_kv).put(put_kv))
         .route(
             "/internal/kv/{key}",
-            get(get_kv_internal)
-                .put(put_kv_internal)
-                .delete(delete_kv_internal),
+            get(get_kv_internal).put(put_kv_internal),
         )
         .with_state(state.clone());
 

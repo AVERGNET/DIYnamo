@@ -27,7 +27,7 @@ pub struct ReplicatedStore {
     pub local: Arc<RocksDbStore>,
     pub gossip: Arc<GossipNode>,
     self_id: String,
-    roster: Vec<ClusterMember>,
+    ring: CoordinatorRing,
 }
 
 impl ReplicatedStore {
@@ -36,13 +36,14 @@ impl ReplicatedStore {
         gossip: Arc<GossipNode>,
         self_id: String,
         roster: Vec<ClusterMember>,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        let ring = CoordinatorRing::from_roster(&roster)?;
+        Ok(Self {
             local,
             gossip,
             self_id,
-            roster,
-        }
+            ring,
+        })
     }
 
     async fn is_online(&self, node_id: &str) -> bool {
@@ -56,8 +57,7 @@ impl ReplicatedStore {
 
 impl StorageEngine for ReplicatedStore {
     async fn get(&self, key: &[u8]) -> Result<Option<VersionedValue>> {
-        let ring = CoordinatorRing::from_roster(&self.roster)?;
-        let owner = ring.owner_for_key(key)?;
+        let owner = self.ring.owner_for_key(key)?;
 
         if owner.id == self.self_id {
             return self.local.get(key).await;
@@ -78,8 +78,7 @@ impl StorageEngine for ReplicatedStore {
     }
 
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let ring = CoordinatorRing::from_roster(&self.roster)?;
-        let owner = ring.owner_for_key(key)?;
+        let owner = self.ring.owner_for_key(key)?;
 
         if owner.id == self.self_id {
             return self.local.put(key, value).await;
@@ -95,21 +94,4 @@ impl StorageEngine for ReplicatedStore {
         client.put_internal_bytes(key, value).await
     }
 
-    async fn delete(&self, key: &[u8]) -> Result<()> {
-        let ring = CoordinatorRing::from_roster(&self.roster)?;
-        let owner = ring.owner_for_key(key)?;
-
-        if owner.id == self.self_id {
-            return self.local.delete(key).await;
-        }
-
-        if !self.is_online(&owner.id).await {
-            return Err(anyhow!(OwnerUnavailable {
-                owner_id: owner.id.clone(),
-            }));
-        }
-
-        let client = KvClient::new(owner.internal_base_url())?;
-        client.delete_internal_bytes(key).await
-    }
 }

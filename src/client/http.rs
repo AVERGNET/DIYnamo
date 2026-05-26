@@ -122,23 +122,4 @@ impl KvClient {
         }
     }
 
-    pub async fn delete_internal_bytes(&self, key: &[u8]) -> Result<()> {
-        let key = std::str::from_utf8(key).context("key must be UTF-8")?;
-        let response = self
-            .http
-            .delete(self.internal_kv_url(key))
-            .send()
-            .await
-            .context("internal delete request failed")?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            bail!(
-                "internal delete failed with status {}: {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            );
-        }
-    }
 }

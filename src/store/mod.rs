@@ -26,5 +26,4 @@ pub struct StoreConfig {
 pub trait StorageEngine: Send + Sync {
     async fn get(&self, key: &[u8]) -> anyhow::Result<Option<VersionedValue>>;
     async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()>;
-    async fn delete(&self, key: &[u8]) -> anyhow::Result<()>;
 }

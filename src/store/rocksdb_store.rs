@@ -64,10 +64,4 @@ impl StorageEngine for RocksDbStore {
         Ok(())
     }
 
-    async fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
-        self.db
-            .delete(key)
-            .with_context(|| "RocksDB delete failed")?;
-        Ok(())
-    }
 }
