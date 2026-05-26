@@ -102,12 +102,11 @@ impl GossipNode {
     }
 }
 
-fn node_state_to_member<I: std::fmt::Display, A: std::fmt::Display>(
-    state: &NodeState<I, A>,
-) -> MemberInfo {
+fn node_state_to_member(state: &NodeState<SmolStr, SocketAddr>) -> MemberInfo {
     MemberInfo {
         id: state.id.to_string(),
-        addr: state.addr.to_string(),
+        gossip_addr: state.addr,
+        forward_port: 0,
     }
 }
 

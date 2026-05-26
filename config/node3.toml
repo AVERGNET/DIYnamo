@@ -6,3 +6,19 @@ data_dir = "./data/n3"
 
 [cluster]
 join = ["127.0.0.1:7946"]
+seeds = ["http://127.0.0.1:8081"]
+
+[[cluster.members]]
+id = "n1"
+gossip_addr = "127.0.0.1:7946"
+forward_port = 8081
+
+[[cluster.members]]
+id = "n2"
+gossip_addr = "127.0.0.1:7947"
+forward_port = 8082
+
+[[cluster.members]]
+id = "n3"
+gossip_addr = "127.0.0.1:7948"
+forward_port = 8083

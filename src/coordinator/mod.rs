@@ -1,36 +1,115 @@
 use std::sync::Arc;
 
+use anyhow::{anyhow, Result};
+use crate::client::KvClient;
+use crate::cluster::ring::CoordinatorRing;
 use crate::cluster::GossipNode;
+use crate::config::ClusterMember;
 use crate::store::rocksdb_store::RocksDbStore;
 use crate::store::{StorageEngine, VersionedValue};
 
-/// The central coordinator struct. Owns the local RocksDB store and the gossip
-/// node, and exposes them behind a single `StorageEngine` implementation.
-///
-/// Currently delegates all storage operations directly to the local store.
-/// Future work extends this type with quorum reads/writes, hinted handoff,
-/// and key migration — without changing the interface seen by `server.rs`.
+/// Owner is in the ring but gossip reports it as unreachable.
+#[derive(Debug)]
+pub struct OwnerUnavailable {
+    pub owner_id: String,
+}
+
+impl std::fmt::Display for OwnerUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "owner {} is not available", self.owner_id)
+    }
+}
+
+impl std::error::Error for OwnerUnavailable {}
+
+/// Coordinates KV operations: hash-ring owner lookup, forward to peers via internal HTTP.
 pub struct ReplicatedStore {
     pub local: Arc<RocksDbStore>,
     pub gossip: Arc<GossipNode>,
+    self_id: String,
+    roster: Vec<ClusterMember>,
 }
 
 impl ReplicatedStore {
-    pub fn new(local: Arc<RocksDbStore>, gossip: Arc<GossipNode>) -> Self {
-        Self { local, gossip }
+    pub fn new(
+        local: Arc<RocksDbStore>,
+        gossip: Arc<GossipNode>,
+        self_id: String,
+        roster: Vec<ClusterMember>,
+    ) -> Self {
+        Self {
+            local,
+            gossip,
+            self_id,
+            roster,
+        }
+    }
+
+    async fn is_online(&self, node_id: &str) -> bool {
+        self.gossip
+            .online_members()
+            .await
+            .iter()
+            .any(|m| m.id == node_id)
     }
 }
 
 impl StorageEngine for ReplicatedStore {
-    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<VersionedValue>> {
-        self.local.get(key).await
+    async fn get(&self, key: &[u8]) -> Result<Option<VersionedValue>> {
+        let ring = CoordinatorRing::from_roster(&self.roster)?;
+        let owner = ring.owner_for_key(key)?;
+
+        if owner.id == self.self_id {
+            return self.local.get(key).await;
+        }
+
+        if !self.is_online(&owner.id).await {
+            return Err(anyhow!(OwnerUnavailable {
+                owner_id: owner.id.clone(),
+            }));
+        }
+
+        let client = KvClient::new(owner.internal_base_url())?;
+        let text = client.get_internal_bytes(key).await?;
+        Ok(Some(VersionedValue {
+            timestamp: 0,
+            data: text.into_bytes(),
+        }))
     }
 
-    async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        self.local.put(key, value).await
+    async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let ring = CoordinatorRing::from_roster(&self.roster)?;
+        let owner = ring.owner_for_key(key)?;
+
+        if owner.id == self.self_id {
+            return self.local.put(key, value).await;
+        }
+
+        if !self.is_online(&owner.id).await {
+            return Err(anyhow!(OwnerUnavailable {
+                owner_id: owner.id.clone(),
+            }));
+        }
+
+        let client = KvClient::new(owner.internal_base_url())?;
+        client.put_internal_bytes(key, value).await
     }
 
-    async fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
-        self.local.delete(key).await
+    async fn delete(&self, key: &[u8]) -> Result<()> {
+        let ring = CoordinatorRing::from_roster(&self.roster)?;
+        let owner = ring.owner_for_key(key)?;
+
+        if owner.id == self.self_id {
+            return self.local.delete(key).await;
+        }
+
+        if !self.is_online(&owner.id).await {
+            return Err(anyhow!(OwnerUnavailable {
+                owner_id: owner.id.clone(),
+            }));
+        }
+
+        let client = KvClient::new(owner.internal_base_url())?;
+        client.delete_internal_bytes(key).await
     }
 }

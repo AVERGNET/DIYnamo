@@ -18,10 +18,22 @@ pub struct NodeSection {
     pub data_dir: String,
 }
 
+/// Static roster entry used to build the consistent hash ring.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClusterMember {
+    pub id: String,
+    pub gossip_addr: SocketAddr,
+    pub forward_port: u16,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ClusterSection {
     #[serde(default)]
     pub join: Vec<SocketAddr>,
+    #[serde(default)]
+    pub members: Vec<ClusterMember>,
+    #[serde(default)]
+    pub seeds: Vec<String>,
 }
 
 /// Fully resolved settings used to start the server.
@@ -32,6 +44,8 @@ pub struct ResolvedServerConfig {
     pub gossip_bind: SocketAddr,
     pub data_dir: String,
     pub join: Vec<SocketAddr>,
+    pub cluster_members: Vec<ClusterMember>,
+    pub seeds: Vec<String>,
 }
 
 impl From<ServerConfigFile> for ResolvedServerConfig {
@@ -42,6 +56,8 @@ impl From<ServerConfigFile> for ResolvedServerConfig {
             gossip_bind: file.node.gossip_bind,
             data_dir: file.node.data_dir,
             join: file.cluster.join,
+            cluster_members: file.cluster.members,
+            seeds: file.cluster.seeds,
         }
     }
 }
@@ -54,6 +70,8 @@ impl Default for ResolvedServerConfig {
             gossip_bind: "127.0.0.1:7946".parse().expect("valid addr"),
             data_dir: "./data/db".into(),
             join: Vec::new(),
+            cluster_members: Vec::new(),
+            seeds: Vec::new(),
         }
     }
 }

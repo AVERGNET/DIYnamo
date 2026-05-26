@@ -40,11 +40,13 @@ mod tests {
         let members = vec![
             MemberInfo {
                 id: "n2".into(),
-                addr: "127.0.0.1:7947".into(),
+                gossip_addr: "127.0.0.1:7947".parse().unwrap(),
+                forward_port: 8082,
             },
             MemberInfo {
                 id: "n1".into(),
-                addr: "127.0.0.1:7946".into(),
+                gossip_addr: "127.0.0.1:7946".parse().unwrap(),
+                forward_port: 8081,
             },
         ];
         let s = format_live_set(&members);
