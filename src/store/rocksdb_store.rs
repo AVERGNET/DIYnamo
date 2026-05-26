@@ -32,7 +32,7 @@ impl RocksDbStore {
 }
 
 impl StorageEngine for RocksDbStore {
-    fn get(&self, key: &[u8]) -> anyhow::Result<Option<VersionedValue>> {
+    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<VersionedValue>> {
         let raw = self
             .db
             .get(key)
@@ -51,7 +51,7 @@ impl StorageEngine for RocksDbStore {
         }
     }
 
-    fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
+    async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         let entry = StoredEntry {
             timestamp: self.clock.now_millis(),
             data: value.to_vec(),
@@ -64,7 +64,7 @@ impl StorageEngine for RocksDbStore {
         Ok(())
     }
 
-    fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
+    async fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
         self.db
             .delete(key)
             .with_context(|| "RocksDB delete failed")?;

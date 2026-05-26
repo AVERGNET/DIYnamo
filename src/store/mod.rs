@@ -22,8 +22,9 @@ pub struct StoreConfig {
 /// The core storage abstraction. All access to the underlying store goes through
 /// this trait, allowing the HTTP layer to depend on it without knowing about RocksDB,
 /// and allowing a ReplicatedStore to wrap it in a future iteration.
+#[allow(async_fn_in_trait)]
 pub trait StorageEngine: Send + Sync {
-    fn get(&self, key: &[u8]) -> anyhow::Result<Option<VersionedValue>>;
-    fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()>;
-    fn delete(&self, key: &[u8]) -> anyhow::Result<()>;
+    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<VersionedValue>>;
+    async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()>;
+    async fn delete(&self, key: &[u8]) -> anyhow::Result<()>;
 }
