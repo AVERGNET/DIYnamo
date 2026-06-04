@@ -30,6 +30,13 @@ impl RocksDbStore {
         Ok(Self { db, clock })
     }
 
+    /// Sample the current timestamp from this store's clock. Used by the
+    /// coordinator to take a single timestamp before fanning out replicated
+    /// writes, so every replica stores the same value for a given write.
+    pub fn now_millis(&self) -> u64 {
+        self.clock.now_millis()
+    }
+
     /// Write `value` to `key` only if `timestamp` is strictly greater than the
     /// timestamp of whatever is currently stored there.
     ///

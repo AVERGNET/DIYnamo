@@ -95,6 +95,9 @@ impl HandoffTask {
 
 /// Attempt to deliver every pending hint destined for `node_id` via its HTTP
 /// endpoint. Successful deliveries are deleted from the hint store immediately.
+///
+/// Each hint carries the coordinator timestamp from the original write so the
+/// target node stores the value with the same timestamp as every other replica.
 async fn deliver_hints(hints: &HintStore, node_id: &str, node_url: &str) {
     let pending = match hints.hints_for_node(node_id) {
         Ok(v) => v,
@@ -104,7 +107,7 @@ async fn deliver_hints(hints: &HintStore, node_id: &str, node_url: &str) {
         }
     };
 
-    for (key, value) in pending {
+    for (key, value, timestamp) in pending {
         let client = match KvClient::new(node_url) {
             Ok(c) => c,
             Err(e) => {
@@ -112,7 +115,7 @@ async fn deliver_hints(hints: &HintStore, node_id: &str, node_url: &str) {
                 return;
             }
         };
-        if client.put_internal_bytes(&key, &value).await.is_ok() {
+        if client.put_internal_versioned_bytes(&key, &value, timestamp).await.is_ok() {
             let _ = hints.delete_hint(node_id, &key);
         }
     }
@@ -143,7 +146,7 @@ async fn reconcile_keys(
 
         if in_pref_list {
             if let Ok(client) = KvClient::new(node_url) {
-                let _ = client.put_internal_bytes(&key, &vv.data).await;
+                let _ = client.put_internal_versioned_bytes(&key, &vv.data, vv.timestamp).await;
             }
         }
     }

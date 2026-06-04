@@ -148,7 +148,7 @@ async fn put_kv_internal_versioned(
 async fn put_hint_internal(
     State(state): State<AppState>,
     Path((target_id, key)): Path<(String, String)>,
-    Json(body): Json<PutBody>,
+    Json(body): Json<PutVersionedBody>,
 ) -> Result<StatusCode, StatusCode> {
     if state.faults.block_hints.load(Ordering::Relaxed) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -156,7 +156,7 @@ async fn put_hint_internal(
     state
         .store
         .hints
-        .store_hint(&target_id, key.as_bytes(), body.value.as_bytes())
+        .store_hint(&target_id, key.as_bytes(), body.value.as_bytes(), body.timestamp)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
