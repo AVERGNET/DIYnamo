@@ -182,6 +182,10 @@ impl StorageEngine for ReplicatedStore {
     }
 
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        // Take a single timestamp here so every replica (and every hint) for
+        // this write is stored with the same value, keeping LWW consistent.
+        let ts = self.local.now_millis();
+
         let all_in_order = self.ring.ring_order_for_key(key)?;
         let pref_list = &all_in_order[..self.n];
         let hint_candidates = &all_in_order[self.n..];
@@ -201,7 +205,7 @@ impl StorageEngine for ReplicatedStore {
                 let k = key.to_vec();
                 let v = value.to_vec();
                 js.spawn(async move {
-                    let r = local.put(&k, &v).await;
+                    let r = local.put_if_newer(&k, &v, ts).map_err(anyhow::Error::from);
                     (node_id, r)
                 });
             } else {
@@ -211,7 +215,7 @@ impl StorageEngine for ReplicatedStore {
                 js.spawn(async move {
                     let r = async {
                         let client = KvClient::new(&url)?;
-                        client.put_internal_bytes(&k, &v).await
+                        client.put_internal_versioned_bytes(&k, &v, ts).await
                     }
                     .await;
                     (node_id, r)
@@ -252,7 +256,7 @@ impl StorageEngine for ReplicatedStore {
                 let url = candidate.internal_base_url();
                 let result = async {
                     let client = KvClient::new(&url)?;
-                    client.put_hint_bytes(target_id, key, value).await
+                    client.put_hint_versioned_bytes(target_id, key, value, ts).await
                 }
                 .await;
 

@@ -149,16 +149,24 @@ impl KvClient {
 
     /// Store a hinted write on this node on behalf of `target_id`.
     ///
-    /// The receiving node keeps the hint in its local HintStore and delivers it
-    /// to `target_id` once that node is back online.
-    pub async fn put_hint_bytes(&self, target_id: &str, key: &[u8], value: &[u8]) -> Result<()> {
+    /// The receiving node keeps the hint (including `timestamp`) in its local
+    /// HintStore and delivers it to `target_id` with the same coordinator
+    /// timestamp once that node is back online.
+    pub async fn put_hint_versioned_bytes(
+        &self,
+        target_id: &str,
+        key: &[u8],
+        value: &[u8],
+        timestamp: u64,
+    ) -> Result<()> {
         let key = std::str::from_utf8(key).context("key must be UTF-8")?;
         let value = std::str::from_utf8(value).context("value must be UTF-8")?;
         let response = self
             .http
             .put(self.hint_url(target_id, key))
-            .json(&PutBody {
+            .json(&PutVersionedBody {
                 value: value.to_string(),
+                timestamp,
             })
             .send()
             .await
