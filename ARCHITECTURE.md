@@ -1,35 +1,58 @@
 # DIYnamo Architecture
 
-Internal working doc. Captures the current module structure, the design choices that make the system extensible, and the planned path toward a distributed implementation.
+Internal working doc. Captures the current module structure, the design choices that make the system extensible, and the decisions made during implementation.
 
 ---
 
 ## Current Architecture
 
-The codebase is split into three areas of responsibility:
+The system is a distributed key-value store with sloppy-quorum replication, hinted handoff, and event-driven hint delivery. All seven planned implementation steps are complete.
 
-**`src/store/`** owns everything related to local storage. It defines the `StorageEngine` trait (`get`, `put`, `delete`) and the `RocksDbStore` type that implements it against RocksDB. Values are stored as versioned records — each write is stamped with a physical timestamp by an injected `TimestampSource`. The HTTP layer has no dependency on RocksDB directly; it only sees the trait.
+**`src/store/`** owns everything related to local storage. It defines the `StorageEngine` trait (`get`, `put`) and two concrete implementations:
 
-**`src/cluster/`** owns cluster membership. `GossipNode` wraps the `memberlist` crate and exposes the live member set as a `Vec<MemberInfo>`. The `MembershipView` trait abstracts this so anything that needs a view of the cluster (future coordinator logic, tests) can depend on the trait rather than the concrete gossip implementation. `run_live_set_printer` is a thin utility for debugging cluster state.
+- `RocksDbStore` — the on-disk store. Values are persisted as `StoredEntry` (timestamp + data bytes), serialized with bincode. Exposes `put_if_newer` for read-repair writes (only overwrites if the incoming timestamp is strictly greater than the stored one) and `iter_all` for full-scan reconciliation.
+- `HintStore` — a separate RocksDB instance at `{data_dir}/hints`. Keys are `{target_node_id}/{original_key}`; values are raw bytes. Used by the coordinator to park writes for nodes that are temporarily offline.
 
-**`src/bin/` and `src/client/`** are the entry points. `server.rs` is the HTTP server. It currently holds an `Arc<dyn StorageEngine>` and serves `GET /kv/{key}` and `PUT /kv/{key}`. `cli.rs` is an interactive client that talks to a running server over HTTP. `gossip.rs` is a standalone binary for exercising the gossip layer in isolation. The `client/` module contains `KvClient`, an async HTTP client that both the CLI and (eventually) the coordinator will use to talk to peer nodes.
+**`src/cluster/`** owns cluster membership and gossip metadata.
+
+- `delegate.rs` — `NodeMeta` (18-byte fixed encoding: 16-byte startup UUID + 2-byte HTTP port big-endian) and `DiynamoNodeDelegate`, a `NodeDelegate` impl that advertises `NodeMeta` in every alive gossip message. Each node generates a fresh UUID on process start; a UUID change signals a process restart.
+- `membership.rs` — `GossipNode` wraps `memberlist` with a `CompositeDelegate` that combines `DiynamoNodeDelegate` (node metadata) and `SubscribleEventDelegate` (event fan-out). `node_state_to_member` decodes `NodeMeta` from gossip meta bytes to populate `MemberInfo.forward_port` and `MemberInfo.uuid`. `GossipNode::subscribe()` hands out the `EventSubscriber` (one-shot; panics if called twice).
+- `ring.rs` — `CoordinatorRing` wraps `hashring_coordinator` and exposes `preference_list_for_key(key, n)` (top N nodes in ring order) and `ring_order_for_key(key)` (all roster nodes, so `result[n..]` are hint candidates).
+- `types.rs` — `MemberInfo` carries `id`, `gossip_addr`, `forward_port`, and `uuid`.
+
+**`src/coordinator/`** owns distributed coordination.
+
+- `mod.rs` — `ReplicatedStore` implements `StorageEngine` and wraps `RocksDbStore`, `GossipNode`, `HintStore`, and `CoordinatorRing`. `put` runs sloppy-quorum writes: it attempts all N preferred nodes in parallel and, for any that fail, walks hint candidates in ring order until one accepts a hinted write; it returns success if `real_acks + hint_acks >= W`. `get` reads all N preferred nodes in parallel, requires R successful responses, picks the highest-timestamp winner (LWW), and fire-and-forgets `put_internal_versioned_bytes` to any stale replicas. `ReplicatedStore::new` spawns the `HandoffTask` and stores the `JoinHandle`.
+- `handoff.rs` — `HandoffTask` runs a background Tokio task driven by `GossipNode::subscribe()`. On every `Join` or `Update` event: (1) deliver all pending hints for that node via `KvClient::put_internal_bytes` and delete them on success; (2) if the node's UUID differs from the last-seen value, iterate `RocksDbStore::iter_all` and push every key whose preference list includes that node (UUID-change reconciliation for restarts and new nodes).
+
+**`src/client/`** contains `KvClient`, a reqwest-based HTTP client used by both the CLI and the coordinator for all peer-to-peer calls. Internal endpoints (`/internal/kv/{key}`, `/internal/kv-versioned/{key}`, `/internal/hint/{target_id}/{key}`) bypass quorum and operate directly on the local store or hint store.
+
+**`src/bin/`** contains the three entry points. `server.rs` generates a startup UUID, constructs `NodeMeta`, starts `GossipNode`, opens the data and hint stores, builds `ReplicatedStore` (which spawns `HandoffTask`), and serves four routes. `cli.rs` is an interactive client. `gossip.rs` is a standalone binary for exercising gossip in isolation.
 
 ```
 src/
 ├── store/
 │   ├── mod.rs           StorageEngine trait, VersionedValue, StoreConfig
-│   ├── rocksdb_store.rs RocksDbStore: impl StorageEngine
+│   ├── rocksdb_store.rs RocksDbStore: get, put, put_if_newer, iter_all
+│   ├── hints.rs         HintStore: store_hint, hints_for_node, delete_hint
 │   └── timestamp.rs     TimestampSource trait + SystemTimestamp
 ├── cluster/
-│   ├── membership.rs    GossipNode, MembershipView trait
-│   ├── types.rs         MemberInfo
+│   ├── delegate.rs      NodeMeta (18-byte encoding), DiynamoNodeDelegate
+│   ├── membership.rs    GossipNode (CompositeDelegate), MembershipView trait
+│   ├── ring.rs          CoordinatorRing: preference_list_for_key, ring_order_for_key
+│   ├── types.rs         MemberInfo (id, gossip_addr, forward_port, uuid)
 │   └── printer.rs       run_live_set_printer, format_live_set
+├── coordinator/
+│   ├── mod.rs           ReplicatedStore: quorum put/get, sloppy quorum, read repair
+│   └── handoff.rs       HandoffTask: hint delivery + UUID-change reconciliation
 ├── client/
-│   └── http.rs          KvClient (reqwest-based)
+│   └── http.rs          KvClient (put, get, put_internal_bytes, put_hint_bytes, …)
 ├── api/
-│   └── types.rs         PutBody, GetResponse (shared HTTP types)
+│   └── types.rs         PutBody, PutVersionedBody, GetResponse (with timestamp)
+├── config/
+│   └── …                ResolvedServerConfig with n, w, r, data_dir, cluster.members
 └── bin/
-    ├── server.rs        HTTP server entry point
+    ├── server.rs        HTTP server: /kv, /internal/kv, /internal/kv-versioned, /internal/hint
     ├── cli.rs           Interactive CLI client
     └── gossip.rs        Standalone gossip node (for testing)
 ```
@@ -38,77 +61,81 @@ src/
 
 ## The Three Extension Points
 
-These are the traits that let us evolve the system without rewriting the HTTP layer.
+These traits separate concerns and make the system testable at every layer.
 
-**`StorageEngine`** is the seam between the HTTP layer and everything below it. Today `server.rs` holds an `Arc<dyn StorageEngine>` backed by `RocksDbStore`. When we build the distributed layer, we will introduce a `ReplicatedStore` that also implements `StorageEngine`. Swapping it in requires changing one line in `server.rs` — the HTTP handlers stay untouched.
+**`StorageEngine`** is the seam between the HTTP layer and everything below it. `server.rs` holds an `Arc<ReplicatedStore>` (which implements `StorageEngine`) and a separate `Arc<RocksDbStore>` for direct local writes on the internal endpoints. The public HTTP handlers never touch RocksDB directly.
 
-**`MembershipView`** is the seam between anything that needs to know about cluster topology and the gossip implementation. The coordinator will need to ask "who are the live nodes?" to build a preference list. By depending on `MembershipView` rather than `GossipNode` directly, the coordinator is testable without a running memberlist cluster — a mock that returns a fixed list of members is a straightforward substitute.
+**`MembershipView`** is the seam between coordinator logic and the gossip implementation. `ReplicatedStore` calls `gossip.online_members()` on every quorum operation to filter the preference list to reachable nodes. The trait is implemented for both `GossipNode` and `Arc<GossipNode>`, so tests can substitute a mock without a live cluster.
 
-**`TimestampSource`** decouples timestamp generation from wall-clock time. `RocksDbStore` takes a `Box<dyn TimestampSource>` at construction time. In production, `SystemTimestamp` is used. In tests, a mock that returns controlled values makes last-write-wins behavior deterministic without any time manipulation.
+**`TimestampSource`** decouples timestamp generation from wall-clock time. `RocksDbStore` takes a `Box<dyn TimestampSource>` at construction time. `SystemTimestamp` is used in production; a mock can return controlled values for deterministic LWW testing.
 
 ---
 
-## Planned Extension Path
-
-Each step below is independent enough to be a separate PR. The key property in each case is that the HTTP layer (`server.rs`) does not need to change until the final coordinator step.
-
-### Step 1 — Gossip integration into the server
-
-`AppState` in `server.rs` gains a second field: `Arc<GossipNode>` alongside `Arc<dyn StorageEngine>`. At this point the server can see who is in the cluster but does not yet use that information for routing. This step is mostly infrastructure: ensuring the server starts a gossip node on a configurable bind address, joins seeds on startup, and shuts it down cleanly. It also establishes the pattern — `AppState` is the place where all shared cluster state lives.
-
-### Step 2 — Consistent hash ring
-
-We introduce a `RingView` component (backed by the `hash_ring` crate) that takes a `Vec<MemberInfo>` from gossip and answers "for this key, what is the ordered preference list of nodes?" The ring is not a long-lived stateful object — it is built from the current member list on each request. This keeps the implementation simple: no background ring-maintenance task, no cache invalidation problem. The preference list is just a sorted slice of `MemberInfo` used by the coordinator.
-
-### Step 3 — `ReplicatedStore`
-
-This is the core of the distributed implementation. `ReplicatedStore` implements `StorageEngine` and wraps three things: the local `RocksDbStore`, a `MembershipView` for the ring, and a `KvClient` for forwarding operations to peer nodes. When `put` is called, the coordinator computes the preference list for the key, issues writes to the top W nodes in parallel (including itself if it is in the preference list), and waits for W acknowledgements before returning success. `get` does the same for R reads, applies last-write-wins using `VersionedValue::timestamp` to pick the winner, and writes the winner back to any stale replicas (read repair). Swapping `RocksDbStore` for `ReplicatedStore` in `server.rs` is the only change the HTTP layer sees.
-
-### Step 4 — Hinted handoff
-
-When a write's preference list includes a node that is offline (not in `MembershipView::online_members`), the coordinator stores a *hint* locally: the intended target node id and the key/value pair. Hints live in a dedicated RocksDB column family rather than the main data column family, so they are easy to enumerate and delete without interfering with normal reads. A background Tokio task runs on each node and periodically checks gossip for nodes that have come back online. When a previously-offline node reappears, the task replays any hints destined for it via `KvClient::put` and deletes them from the hints store on success.
-
-### Step 5 — Node reconciliation
-
-When a node that was fully offline (data lost) or a brand-new node joins the ring, it starts with an empty local store. The gossip join event is visible via `MembershipView`. The new node (or a seed node on its behalf) needs to pull the key range it now owns. The mechanism is: iterate over all keys in the local RocksDB, compute the preference list for each key, and push any key where the new node appears in the preference list. This is a background process and does not affect availability for ongoing requests.
+## How the Pieces Fit Together
 
 ```
-Current:
-  server.rs  ──►  Arc<dyn StorageEngine>  ──►  RocksDbStore  ──►  RocksDB
-
-After step 3:
-  server.rs  ──►  Arc<dyn StorageEngine>
-                        │
-                        ▼
-                  ReplicatedStore
-                 /       |        \
-      RocksDbStore   RingView   KvClient(s)
-            │            │
-          RocksDB    MembershipView
-                          │
-                       GossipNode
+HTTP client
+    │
+    ▼
+server.rs ──► Arc<ReplicatedStore> ──────────────────────────────────┐
+                    │                                                  │
+              StorageEngine::put / get                         _handoff: JoinHandle
+                    │                                                  │
+          ┌─────────┼──────────────┐                      HandoffTask (background)
+          │         │              │                       ├── EventSubscriber ◄── GossipNode
+    local store   ring          hints                      ├── hints: Arc<HintStore>
+  RocksDbStore  CoordinatorRing  HintStore                 └── iter_all on RocksDbStore
+          │         │
+        RocksDB   hashring_coordinator
+                    │
+              MembershipView
+                    │
+               GossipNode
+              (CompositeDelegate:
+               DiynamoNodeDelegate    ← broadcasts NodeMeta {uuid, http_port}
+               SubscribleEventDelegate ← feeds HandoffTask)
 ```
+
+**Write path (put):**
+1. `preference_list_for_key(key, N)` → N nodes in ring order.
+2. Parallel `put_internal_bytes` to each preferred node (or local `put` if self).
+3. For each failed preferred node, walk hint candidates in ring order; store a hint on the first candidate that accepts it.
+4. Return `Ok(())` if `real_acks + hint_acks >= W`; else `Err(QuorumFailed)` → HTTP 503.
+
+**Read path (get):**
+1. `preference_list_for_key(key, N)` → parallel `get_internal_versioned` from all N.
+2. Require R successful responses; else `Err(QuorumFailed)`.
+3. LWW: take the `Some(v)` with the highest `v.timestamp`.
+4. Fire-and-forget `put_internal_versioned_bytes` (write-if-newer) to any replica that returned a stale or missing value.
+
+**Hint delivery (HandoffTask):**
+- Driven by gossip `Join` / `Update` events.
+- On each event: deliver all pending hints for that node; if UUID changed, push every locally-held key in that node's preference list.
+
+---
+
+## Design Decisions
+
+**Hint key layout uses a flat prefix, not a column family.** `{target_id}/{original_key}` in a single RocksDB instance is simpler to iterate by prefix and requires no column family management. The hint DB lives at `{data_dir}/hints`, separate from the main data DB, so iteration is already isolated.
+
+**Sloppy quorum counts hints toward W.** A hinted write on a substitute node counts as an acknowledgement. This keeps availability high under partial failures at the cost of weaker consistency — the hint may be delayed in reaching its intended target. Dynamo calls this "sloppy quorum."
+
+**Read repair uses write-if-newer, not unconditional put.** The receiving node's `/internal/kv-versioned` endpoint calls `put_if_newer`, which only writes if the incoming timestamp exceeds the stored one. This prevents a stale repair that was delayed in-flight from overwriting a newer external write that arrived in the interim.
+
+**UUID-change detection replaces explicit join events for reconciliation.** The `HandoffTask` treats any UUID change (new value or first appearance) as a signal to push the full key range for that node. This handles both new nodes joining and nodes that restarted with empty storage, without requiring explicit "I lost my data" signalling.
+
+**Any node can coordinate.** There is no dedicated coordinator role. `server.rs` wraps `ReplicatedStore` directly, so whichever node receives the client request coordinates that operation. This matches Dynamo's design more closely than the seed-only alternative.
 
 ---
 
 ## Out of Scope
 
-**Merkle tree anti-entropy.** The Dynamo paper uses Merkle trees to efficiently detect and repair long-term divergence between replicas. We are not implementing this. Read repair on `get` handles short-term divergence, and hinted handoff handles the node-failure case. Merkle trees would be the right next step for production hardening but are out of scope for this project.
+**Merkle tree anti-entropy.** Read repair on `get` handles short-term divergence; hinted handoff and UUID-change reconciliation handle node-failure cases. Merkle trees would detect long-term silent divergence but are out of scope for this project.
 
-**Vector clocks.** The paper uses vector clocks to track causal history and surfaces concurrent writes to the client for application-level resolution. We replace this with physical timestamps and last-write-wins. This means silent data loss is possible when two writes happen to different replicas within the same millisecond, but it greatly simplifies the implementation and the HTTP interface.
+**Vector clocks.** We use physical timestamps and last-write-wins. Silent data loss is possible when two writes land on different replicas within the same millisecond, but this greatly simplifies the implementation and the HTTP interface.
 
-**Virtual node placement strategies.** Dynamo implements multiple strategies for distributing virtual nodes around the ring to control load balance. We distribute virtual nodes randomly using `hash_ring`'s default behavior.
+**Virtual node placement strategies.** Virtual nodes are distributed using `hashring_coordinator`'s default behavior. Dynamo's per-strategy placement policies are not implemented.
 
-**Custom gossip implementation.** We use `memberlist` for gossip. Replacing it with a hand-rolled implementation is a stretch goal noted in the proposal but not planned.
+**Custom gossip implementation.** We use the `memberlist` crate. A hand-rolled gossip protocol remains a stretch goal.
 
----
-
-## Open Questions
-
-- **Hint storage format.** Should hints be stored as a separate RocksDB column family, or as a separate key prefix in the default column family? Column family is cleaner isolation; prefix is simpler to implement now.
-
-- **Coordinator identity.** The proposal says seed nodes act as coordinators for requests they service. Do we route all client writes to a seed, or can any node coordinate for its own key range? The former is simpler; the latter matches Dynamo more closely.
-
-- **Quorum failure behavior.** If we cannot reach W nodes for a write, do we fail the request or accept it and rely on repair? The proposal implies failing the write when W can't be reached, but hinted handoff complicates this — a hint counts as a write to an unavailable node in sloppy quorum.
-
-- **Clock skew.** We use `SystemTime` for timestamps. If two nodes have significantly different wall clocks, LWW will silently discard writes in a non-intuitive order. Is this acceptable for evaluation, or should we add a warning/note to the evaluation section?
+**Clock skew.** `SystemTime` is used for LWW timestamps. Nodes with significantly skewed clocks may discard writes in a non-intuitive order. This is acceptable for evaluation; a production system would use hybrid logical clocks or NTP with bounded skew.
