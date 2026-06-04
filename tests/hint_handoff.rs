@@ -122,8 +122,7 @@ async fn hint_fails_over_to_second_candidate() {
 }
 
 
-/// Slower recovery path: block both HTTP surfaces, take gossip down, then bring
-/// HTTP and gossip back (peers should see Join).
+/// Hint delivery: kill node (HTTP + gossip), write with hint, recover, assert handoff.
 #[tokio::test]
 #[serial]
 async fn hint_delivered_after_http_ports_recover_slow() {
@@ -142,8 +141,7 @@ async fn hint_delivered_after_http_ports_recover_slow() {
     let seed_gossip = cluster.roster[0].gossip_addr;
 
     let dead = cluster.node(&dead_id);
-    dead.kill_http();
-    dead.suspend_gossip().await.expect("suspend gossip");
+    dead.kill_node().await.expect("kill node (http + gossip)");
 
     let observer_id_poll = observer_id.clone();
     let dead_id_gone = dead_id.clone();
@@ -179,11 +177,11 @@ async fn hint_delivered_after_http_ports_recover_slow() {
         .expect("read hints");
     assert_eq!(candidate_hints.len(), 1, "hint should exist before recovery");
 
-    let dead = cluster.node(&dead_id);
-    dead.restart_gossip(seed_gossip)
+    cluster
+        .node(&dead_id)
+        .recover_node(seed_gossip)
         .await
-        .expect("restart gossip");
-    dead.recover_http();
+        .expect("recover node (http + gossip)");
 
     let dead_id_poll = dead_id.clone();
     let candidate_id_poll = candidate_id.clone();

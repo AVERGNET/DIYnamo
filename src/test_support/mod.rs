@@ -269,9 +269,23 @@ impl TestNode {
         self.faults.recover_http();
     }
 
+    /// Full outage: block HTTP and shut down gossip (peers stop seeing this node).
+    pub async fn kill_node(&self) -> Result<()> {
+        self.kill_http();
+        self.suspend_gossip().await
+    }
+
     /// Stop gossip (peers should eventually drop this node from the live set).
     pub async fn suspend_gossip(&self) -> Result<()> {
         self.gossip_handle().shutdown().await
+    }
+
+    /// Bring HTTP and gossip back after `kill_node`.
+    pub async fn recover_node(&self, seed: SocketAddr) -> Result<()> {
+        self.restart_gossip(seed).await?;
+        self.recover_http();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
     }
 
     /// Start a fresh gossip instance on the same bind address and rejoin the cluster.
