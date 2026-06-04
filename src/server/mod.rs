@@ -34,8 +34,24 @@ impl FaultFlags {
         self.block_internal.store(on, Ordering::Relaxed);
     }
 
+    pub fn block_public(&self, on: bool) {
+        self.block_public.store(on, Ordering::Relaxed);
+    }
+
     pub fn block_hints(&self, on: bool) {
         self.block_hints.store(on, Ordering::Relaxed);
+    }
+
+    /// Block all client-facing and replica HTTP on this node (hints still accepted).
+    pub fn kill_http(&self) {
+        self.block_internal(true);
+        self.block_public(true);
+    }
+
+    /// Restore client-facing and replica HTTP.
+    pub fn recover_http(&self) {
+        self.block_internal(false);
+        self.block_public(false);
     }
 }
 

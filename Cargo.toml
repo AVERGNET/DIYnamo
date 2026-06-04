@@ -48,3 +48,4 @@ test-utils = ["tempfile"]
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serial_test = "3"

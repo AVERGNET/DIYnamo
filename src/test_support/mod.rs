@@ -1,7 +1,7 @@
 //! In-process multi-node cluster harness for integration tests.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -30,7 +30,7 @@ pub struct TestNode {
     pub faults: FaultFlags,
     _data_dir: TempDir,
     _server: JoinHandle<()>,
-    gossip: Arc<GossipNode>,
+    gossip: Arc<RwLock<Arc<GossipNode>>>,
 }
 
 /// Multi-node cluster for integration tests.
@@ -42,6 +42,53 @@ pub struct TestCluster {
     pub r: usize,
 }
 
+async fn reserve_gossip_addr(id: &str) -> Result<SocketAddr> {
+    const EADDRINUSE: i32 = 98;
+    for attempt in 0..8 {
+        match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => {
+                let addr = listener.local_addr()?;
+                drop(listener);
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
+                }
+                return Ok(addr);
+            }
+            Err(e) if e.raw_os_error() == Some(EADDRINUSE) => {
+                tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("bind gossip for {id}"));
+            }
+        }
+    }
+    anyhow::bail!("could not reserve gossip port for {id} after retries");
+}
+
+async fn start_gossip_with_retry(
+    id: &str,
+    gossip_addr: SocketAddr,
+    join: &[SocketAddr],
+    node_meta: NodeMeta,
+) -> Result<Arc<GossipNode>> {
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match GossipNode::start(id, gossip_addr, join, node_meta).await {
+            Ok(node) => return Ok(node),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                last_err = Some(e);
+                if msg.contains("Address already in use") || msg.contains("os error 98") {
+                    tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64)).await;
+                    continue;
+                }
+                return Err(last_err.unwrap());
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
 impl TestCluster {
     /// Spawn a cluster with the given node ids (e.g. `["n1","n2",...]`).
     pub async fn spawn(node_ids: &[&str], n: usize, w: usize, r: usize) -> Result<Self> {
@@ -51,11 +98,7 @@ impl TestCluster {
                 .await
                 .with_context(|| format!("bind http for {id}"))?;
             let http_addr = http_listener.local_addr()?;
-            let gossip_listener = TcpListener::bind("127.0.0.1:0")
-                .await
-                .with_context(|| format!("bind gossip for {id}"))?;
-            let gossip_addr = gossip_listener.local_addr()?;
-            drop(gossip_listener);
+            let gossip_addr = reserve_gossip_addr(id).await?;
             bindings.push((id.to_string(), http_listener, http_addr, gossip_addr));
         }
 
@@ -92,12 +135,13 @@ impl TestCluster {
                 uuid: uuid::Uuid::new_v4().into_bytes(),
                 http_port: http_addr.port(),
             };
-            let gossip =
-                GossipNode::start(&id, gossip_addr, &join, node_meta).await?;
+            let gossip = Arc::new(RwLock::new(
+                start_gossip_with_retry(&id, gossip_addr, &join, node_meta).await?,
+            ));
 
             let store = Arc::new(ReplicatedStore::new(
                 local.clone(),
-                gossip.clone(),
+                gossip.read().unwrap().clone(),
                 hints.clone(),
                 id.clone(),
                 roster.clone(),
@@ -151,6 +195,23 @@ impl TestCluster {
             .find(|n| n.id == id)
             .unwrap_or_else(|| panic!("unknown node id: {id}"))
     }
+
+    /// Stop HTTP servers and gossip on every node (call at end of tests or on drop).
+    pub async fn shutdown_all(&self) {
+        for node in &self.nodes {
+            node._server.abort();
+            let _ = node.gossip_handle().shutdown().await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+impl Drop for TestCluster {
+    fn drop(&mut self) {
+        for node in &mut self.nodes {
+            node._server.abort();
+        }
+    }
 }
 
 async fn wait_for_cluster(nodes: &[TestNode], expected: usize) -> Result<()> {
@@ -158,7 +219,7 @@ async fn wait_for_cluster(nodes: &[TestNode], expected: usize) -> Result<()> {
     loop {
         let mut ok = true;
         for node in nodes {
-            let online = node.gossip.online_members().await.len();
+            let online = node.gossip.read().unwrap().online_members().await.len();
             if online < expected {
                 ok = false;
                 break;
@@ -175,8 +236,98 @@ async fn wait_for_cluster(nodes: &[TestNode], expected: usize) -> Result<()> {
     }
 }
 
+/// Poll `condition` until it returns true or the timeout elapses.
+pub async fn poll_until<F, Fut>(timeout: Duration, interval: Duration, mut condition: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if condition().await {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("poll_until timed out after {:?}", timeout);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 impl TestNode {
+    fn gossip_handle(&self) -> Arc<GossipNode> {
+        self.gossip.read().unwrap().clone()
+    }
+
+    /// Block public and internal HTTP (replica RPCs), leave hint endpoint up.
+    pub fn kill_http(&self) {
+        self.faults.kill_http();
+    }
+
+    /// Unblock public and internal HTTP.
+    pub fn recover_http(&self) {
+        self.faults.recover_http();
+    }
+
+    /// Stop gossip (peers should eventually drop this node from the live set).
+    pub async fn suspend_gossip(&self) -> Result<()> {
+        self.gossip_handle().shutdown().await
+    }
+
+    /// Start a fresh gossip instance on the same bind address and rejoin the cluster.
+    pub async fn restart_gossip(&self, seed: SocketAddr) -> Result<()> {
+        let join = if self.gossip_addr == seed {
+            vec![]
+        } else {
+            vec![seed]
+        };
+        let meta = NodeMeta {
+            uuid: uuid::Uuid::new_v4().into_bytes(),
+            http_port: self.http_addr.port(),
+        };
+        let node = start_gossip_with_retry(&self.id, self.gossip_addr, &join, meta).await?;
+        *self.gossip.write().unwrap() = node;
+        Ok(())
+    }
+
+    /// Whether `observer` sees `target` in its gossip live set.
+    pub async fn peer_sees_node(&self, target_id: &str) -> bool {
+        self.gossip_handle()
+            .online_members()
+            .await
+            .iter()
+            .any(|m| m.id == target_id)
+    }
+
+    /// Take gossip down, wait until `observer` no longer sees this node, then
+    /// restart gossip and unblock HTTP (triggers peer `Join` for handoff).
+    pub async fn recover_after_outage(
+        &self,
+        seed: SocketAddr,
+        observer: &TestNode,
+        wait_gone: Duration,
+    ) -> Result<()> {
+        self.suspend_gossip().await?;
+        let deadline = tokio::time::Instant::now() + wait_gone;
+        while observer.peer_sees_node(&self.id).await {
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "peer {} still sees {} after {:?}",
+                    observer.id,
+                    self.id,
+                    wait_gone
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        self.restart_gossip(seed).await?;
+        self.recover_http();
+        // Let peers process Join and run HandoffTask.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
-        self.gossip.shutdown().await
+        self.gossip_handle().shutdown().await
     }
 }
