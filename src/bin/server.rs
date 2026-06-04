@@ -1,29 +1,17 @@
 use anyhow::Result;
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-    Json, Router,
-};
 use clap::Parser;
-use diynamo::api::types::{GetResponse, PutBody, PutVersionedBody};
 use diynamo::cluster::{run_live_set_printer, GossipNode};
 use diynamo::cluster::delegate::NodeMeta;
 use diynamo::config::resolve;
-use diynamo::coordinator::{QuorumFailed, ReplicatedStore};
+use diynamo::coordinator::ReplicatedStore;
+use diynamo::server::{router, AppState, FaultFlags};
 use diynamo::store::rocksdb_store::RocksDbStore;
 use diynamo::store::timestamp::SystemTimestamp;
-use diynamo::store::{HintStore, StoreConfig, StorageEngine};
+use diynamo::store::{HintStore, StoreConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-
-#[derive(Clone)]
-struct AppState {
-    store: Arc<ReplicatedStore>,
-    local: Arc<RocksDbStore>,
-}
 
 /// CLI arguments. Values from the config file are overridden when the same flag is set.
 #[derive(Parser)]
@@ -65,121 +53,6 @@ fn maybe_wipe_data_dir(data_dir: &str, wipe: bool) -> Result<()> {
         println!("wiped RocksDB data dir: {}", path.display());
     }
     Ok(())
-}
-
-fn map_store_error(err: anyhow::Error) -> StatusCode {
-    if err.downcast_ref::<QuorumFailed>().is_some() {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-}
-
-async fn put_kv(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-    Json(body): Json<PutBody>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .store
-        .put(key.as_bytes(), body.value.as_bytes())
-        .await
-        .map_err(map_store_error)?;
-    Ok(StatusCode::OK)
-}
-
-async fn get_kv(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-) -> Result<Json<GetResponse>, StatusCode> {
-    let versioned = state
-        .store
-        .get(key.as_bytes())
-        .await
-        .map_err(map_store_error)?;
-
-    match versioned {
-        Some(v) => {
-            let value =
-                String::from_utf8(v.data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(Json(GetResponse {
-                value,
-                timestamp: v.timestamp,
-            }))
-        }
-        None => Err(StatusCode::NOT_FOUND),
-    }
-}
-
-async fn put_kv_internal(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-    Json(body): Json<PutBody>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .local
-        .put(key.as_bytes(), body.value.as_bytes())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
-}
-
-/// Local-only conditional put via `/internal/kv-versioned/{key}`.
-///
-/// Writes `value` only if the stored timestamp for `key` is strictly less than
-/// `body.timestamp` (write-if-newer). Used exclusively by read repair so that
-/// a stale repair carrying an older timestamp can never overwrite a fresher
-/// external write that arrived while the repair was in flight.
-async fn put_kv_internal_versioned(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-    Json(body): Json<PutVersionedBody>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .local
-        .put_if_newer(key.as_bytes(), body.value.as_bytes(), body.timestamp)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
-}
-
-/// Accept a hinted write on behalf of `target_id`.
-///
-/// The value is stored in this node's local HintStore (not the main data store).
-/// The HandoffTask will deliver it to `target_id` once that node is back online.
-async fn put_hint_internal(
-    State(state): State<AppState>,
-    Path((target_id, key)): Path<(String, String)>,
-    Json(body): Json<PutBody>,
-) -> Result<StatusCode, StatusCode> {
-    state
-        .store
-        .hints
-        .store_hint(&target_id, key.as_bytes(), body.value.as_bytes())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
-}
-
-async fn get_kv_internal(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-) -> Result<Json<GetResponse>, StatusCode> {
-    let versioned = state
-        .local
-        .get(key.as_bytes())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match versioned {
-        Some(v) => {
-            let value =
-                String::from_utf8(v.data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(Json(GetResponse {
-                value,
-                timestamp: v.timestamp,
-            }))
-        }
-        None => Err(StatusCode::NOT_FOUND),
-    }
 }
 
 #[tokio::main]
@@ -228,24 +101,14 @@ async fn main() -> Result<()> {
         cfg.w,
         cfg.r,
     )?);
-    let state = AppState { store, local };
+    let state = AppState {
+        store,
+        local,
+        faults: FaultFlags::default(),
+    };
 
     let addr = format!("0.0.0.0:{}", cfg.port);
-    let app = Router::new()
-        .route("/kv/{key}", get(get_kv).put(put_kv))
-        .route(
-            "/internal/kv/{key}",
-            get(get_kv_internal).put(put_kv_internal),
-        )
-        .route(
-            "/internal/kv-versioned/{key}",
-            axum::routing::put(put_kv_internal_versioned),
-        )
-        .route(
-            "/internal/hint/{target_id}/{key}",
-            axum::routing::put(put_hint_internal),
-        )
-        .with_state(state.clone());
+    let app = router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");

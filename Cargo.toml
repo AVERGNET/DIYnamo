@@ -7,6 +7,11 @@ edition = "2024"
 name = "diynamo"
 path = "src/lib.rs"
 
+[[test]]
+name = "hint_handoff"
+path = "tests/hint_handoff.rs"
+required-features = ["test-utils"]
+
 [[bin]]
 name = "cli"
 path = "src/bin/cli.rs"
@@ -34,6 +39,12 @@ memberlist = { version = "0.8.2", default-features = false, features = ["tcp", "
 smol_str = "0.3.6"
 hashring_coordinator = "0.3.3"
 uuid = { version = "1", features = ["v4"] }
+tempfile = { version = "3.27.0", optional = true }
+
+[features]
+default = ["test-utils"]
+test-utils = ["tempfile"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
