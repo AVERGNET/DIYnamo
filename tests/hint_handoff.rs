@@ -17,7 +17,7 @@ fn five_node_ids() -> Vec<&'static str> {
 }
 
 fn ring_order_ids(cluster: &TestCluster, key: &str) -> Vec<String> {
-    let ring = CoordinatorRing::from_roster(&cluster.roster, cluster.n).unwrap();
+    let ring = CoordinatorRing::from_roster(&cluster.roster, cluster.n, cluster.vnodes).unwrap();
     ring.ring_order_for_key(key.as_bytes())
         .unwrap()
         .into_iter()
@@ -28,7 +28,7 @@ fn ring_order_ids(cluster: &TestCluster, key: &str) -> Vec<String> {
 #[tokio::test]
 #[serial]
 async fn hint_stored_on_first_ring_successor() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 
@@ -81,7 +81,7 @@ async fn hint_stored_on_first_ring_successor() {
 #[tokio::test]
 #[serial]
 async fn hint_fails_over_to_second_candidate() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 
@@ -130,7 +130,7 @@ async fn hint_delivered_after_http_ports_recover_slow() {
     const HANDOFF_TIMEOUT: Duration = Duration::from_secs(45);
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 

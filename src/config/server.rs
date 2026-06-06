@@ -35,6 +35,9 @@ fn default_w() -> usize {
 fn default_r() -> usize {
     2
 }
+fn default_vnodes() -> usize {
+    1
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClusterSection {
@@ -50,6 +53,8 @@ pub struct ClusterSection {
     pub w: usize,
     #[serde(default = "default_r")]
     pub r: usize,
+    #[serde(default = "default_vnodes")]
+    pub vnodes: usize,
 }
 
 impl Default for ClusterSection {
@@ -61,6 +66,7 @@ impl Default for ClusterSection {
             n: default_n(),
             w: default_w(),
             r: default_r(),
+            vnodes: default_vnodes(),
         }
     }
 }
@@ -78,6 +84,7 @@ pub struct ResolvedServerConfig {
     pub n: usize,
     pub w: usize,
     pub r: usize,
+    pub vnodes: usize,
 }
 
 impl From<ServerConfigFile> for ResolvedServerConfig {
@@ -93,6 +100,7 @@ impl From<ServerConfigFile> for ResolvedServerConfig {
             n: file.cluster.n,
             w: file.cluster.w,
             r: file.cluster.r,
+            vnodes: file.cluster.vnodes,
         }
     }
 }
@@ -110,6 +118,7 @@ impl Default for ResolvedServerConfig {
             n: default_n(),
             w: default_w(),
             r: default_r(),
+            vnodes: default_vnodes(),
         }
     }
 }
@@ -123,6 +132,7 @@ impl ResolvedServerConfig {
         node_id: Option<String>,
         gossip_bind: Option<SocketAddr>,
         join: Option<Vec<SocketAddr>>,
+        vnodes: Option<usize>,
     ) -> Self {
         if let Some(port) = port {
             self.port = port;
@@ -138,6 +148,9 @@ impl ResolvedServerConfig {
         }
         if let Some(join) = join {
             self.join = join;
+        }
+        if let Some(vnodes) = vnodes {
+            self.vnodes = vnodes;
         }
         self
     }
@@ -157,10 +170,11 @@ pub fn resolve(
     node_id: Option<String>,
     gossip_bind: Option<SocketAddr>,
     join: Option<Vec<SocketAddr>>,
+    vnodes: Option<usize>,
 ) -> Result<ResolvedServerConfig> {
     let base = match config_path {
         Some(path) => ResolvedServerConfig::from(load_server_config(path)?),
         None => ResolvedServerConfig::default(),
     };
-    Ok(base.apply_overrides(port, data_dir, node_id, gossip_bind, join))
+    Ok(base.apply_overrides(port, data_dir, node_id, gossip_bind, join, vnodes))
 }

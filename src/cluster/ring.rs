@@ -17,8 +17,6 @@ impl Hash for RingNode {
     }
 }
 
-const RING_VNODES: usize = 1;
-
 /// Consistent hash ring built from the static config roster.
 pub struct CoordinatorRing {
     members_by_id: HashMap<String, MemberInfo>,
@@ -29,9 +27,13 @@ pub struct CoordinatorRing {
 impl CoordinatorRing {
     /// Build the ring from a static roster.
     ///
+    /// `vnodes` controls how many virtual ring positions each physical node
+    /// occupies. Higher values improve key distribution at the cost of more
+    /// ring metadata. Use 1 for the classic single-point-per-node behaviour.
+    ///
     /// Errors if the roster is empty or smaller than `n` — a cluster with fewer
     /// nodes than the replication factor can never satisfy quorum.
-    pub fn from_roster(roster: &[ClusterMember], n: usize) -> Result<Self> {
+    pub fn from_roster(roster: &[ClusterMember], n: usize, vnodes: usize) -> Result<Self> {
         if roster.is_empty() {
             bail!("cluster roster is empty");
         }
@@ -53,7 +55,7 @@ impl CoordinatorRing {
         // Build with all roster members as replicas so ring.get(key) always returns
         // the full roster in ring order. preference_list_for_key truncates to n;
         // ring_order_for_key exposes the remainder as hint candidates.
-        let mut ring = HashRing::new(roster.len() - 1, RING_VNODES);
+        let mut ring = HashRing::new(roster.len() - 1, vnodes);
         let nodes: Vec<RingNode> = members_by_id
             .keys()
             .map(|id| RingNode { id: id.clone() })
@@ -136,8 +138,8 @@ mod tests {
     #[test]
     fn same_key_same_preference_list() {
         let roster = three_node_roster();
-        let ring1 = CoordinatorRing::from_roster(&roster, 3).unwrap();
-        let ring2 = CoordinatorRing::from_roster(&roster, 3).unwrap();
+        let ring1 = CoordinatorRing::from_roster(&roster, 3, 1).unwrap();
+        let ring2 = CoordinatorRing::from_roster(&roster, 3, 1).unwrap();
         let list1: Vec<_> = ring1
             .preference_list_for_key(b"apple", 3)
             .unwrap()
@@ -156,7 +158,7 @@ mod tests {
     #[test]
     fn preference_list_members_are_cluster_members() {
         let roster = three_node_roster();
-        let ring = CoordinatorRing::from_roster(&roster, 3).unwrap();
+        let ring = CoordinatorRing::from_roster(&roster, 3, 1).unwrap();
         let list = ring.preference_list_for_key(b"banana", 3).unwrap();
         assert!(!list.is_empty());
         for member in &list {
@@ -167,7 +169,7 @@ mod tests {
     #[test]
     fn preference_list_truncated_to_requested_n() {
         let roster = three_node_roster();
-        let ring = CoordinatorRing::from_roster(&roster, 3).unwrap();
+        let ring = CoordinatorRing::from_roster(&roster, 3, 1).unwrap();
         let list = ring.preference_list_for_key(b"cherry", 1).unwrap();
         assert_eq!(list.len(), 1);
     }
@@ -175,7 +177,7 @@ mod tests {
     #[test]
     fn from_roster_rejects_smaller_than_n() {
         let roster = vec![member("n1", 7946, 8081), member("n2", 7947, 8082)];
-        assert!(CoordinatorRing::from_roster(&roster, 3).is_err());
+        assert!(CoordinatorRing::from_roster(&roster, 3, 1).is_err());
     }
 
     #[test]
@@ -187,7 +189,7 @@ mod tests {
             member("n4", 7949, 8084),
             member("n5", 7950, 8085),
         ];
-        let ring = CoordinatorRing::from_roster(&roster, 3).unwrap();
+        let ring = CoordinatorRing::from_roster(&roster, 3, 1).unwrap();
         let order = ring.ring_order_for_key(b"apple").unwrap();
         let plist = ring.preference_list_for_key(b"apple", 3).unwrap();
 

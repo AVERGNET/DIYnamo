@@ -36,6 +36,7 @@ pub struct HandoffTask {
     pub self_id: String,
     pub roster: Vec<ClusterMember>,
     pub n: usize,
+    pub vnodes: usize,
     pub events: EventSubscriber<SmolStr, SocketAddr>,
 }
 
@@ -47,9 +48,9 @@ impl HandoffTask {
     }
 
     async fn run(self) {
-        let Self { hints, local, self_id, roster, n, events, gossip } = self;
+        let Self { hints, local, self_id, roster, n, vnodes, events, gossip } = self;
 
-        let ring = match CoordinatorRing::from_roster(&roster, n) {
+        let ring = match CoordinatorRing::from_roster(&roster, n, vnodes) {
             Ok(r) => Arc::new(r),
             Err(e) => {
                 eprintln!("handoff: failed to build ring, task exiting: {e}");

@@ -40,6 +40,7 @@ pub struct TestCluster {
     pub n: usize,
     pub w: usize,
     pub r: usize,
+    pub vnodes: usize,
 }
 
 async fn reserve_gossip_addr(id: &str) -> Result<SocketAddr> {
@@ -91,7 +92,16 @@ async fn start_gossip_with_retry(
 
 impl TestCluster {
     /// Spawn a cluster with the given node ids (e.g. `["n1","n2",...]`).
-    pub async fn spawn(node_ids: &[&str], n: usize, w: usize, r: usize) -> Result<Self> {
+    ///
+    /// `vnodes` controls virtual ring positions per physical node; pass `1` for
+    /// classic single-point-per-node behaviour. Use `spawn` for the default.
+    pub async fn spawn_with_vnodes(
+        node_ids: &[&str],
+        n: usize,
+        w: usize,
+        r: usize,
+        vnodes: usize,
+    ) -> Result<Self> {
         let mut bindings = Vec::new();
         for id in node_ids {
             let http_listener = TcpListener::bind("127.0.0.1:0")
@@ -148,6 +158,7 @@ impl TestCluster {
                 n,
                 w,
                 r,
+                vnodes,
             )?);
 
             let faults = FaultFlags::default();
@@ -186,7 +197,13 @@ impl TestCluster {
             n,
             w,
             r,
+            vnodes,
         })
+    }
+
+    /// Spawn a cluster using the default of 1 virtual node per physical node.
+    pub async fn spawn(node_ids: &[&str], n: usize, w: usize, r: usize) -> Result<Self> {
+        Self::spawn_with_vnodes(node_ids, n, w, r, 1).await
     }
 
     pub fn node(&self, id: &str) -> &TestNode {

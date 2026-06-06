@@ -23,7 +23,7 @@ fn five_node_ids() -> Vec<&'static str> {
 }
 
 fn ring_order_ids(cluster: &TestCluster, key: &str) -> Vec<String> {
-    let ring = CoordinatorRing::from_roster(&cluster.roster, cluster.n).unwrap();
+    let ring = CoordinatorRing::from_roster(&cluster.roster, cluster.n, cluster.vnodes).unwrap();
     ring.ring_order_for_key(key.as_bytes())
         .unwrap()
         .into_iter()
@@ -78,7 +78,7 @@ fn seed_stale_replica(cluster: &TestCluster, node_id: &str) {
 #[tokio::test]
 #[serial]
 async fn read_repair_updates_stale_replica() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 
@@ -121,7 +121,7 @@ async fn read_repair_updates_stale_replica() {
 #[tokio::test]
 #[serial]
 async fn read_repair_fills_missing_replica() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 
@@ -160,7 +160,7 @@ async fn read_repair_fills_missing_replica() {
 #[tokio::test]
 #[serial]
 async fn read_repair_skips_unresponsive_replica() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 
@@ -191,7 +191,7 @@ async fn read_repair_skips_unresponsive_replica() {
 #[tokio::test]
 #[serial]
 async fn put_if_newer_rejects_stale_repair() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 

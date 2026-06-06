@@ -37,6 +37,10 @@ struct CliArgs {
     #[arg(long = "join", value_delimiter = ',')]
     join: Option<Vec<SocketAddr>>,
 
+    /// Virtual nodes per physical node on the hash ring (overrides config).
+    #[arg(long)]
+    vnodes: Option<usize>,
+
     /// Delete the RocksDB data directory before starting (fresh empty store).
     #[arg(long, default_value_t = false)]
     wipe_data: bool,
@@ -65,6 +69,7 @@ async fn main() -> Result<()> {
         cli.node_id,
         cli.gossip_bind,
         cli.join,
+        cli.vnodes,
     )?;
 
     if cfg.cluster_members.is_empty() {
@@ -100,6 +105,7 @@ async fn main() -> Result<()> {
         cfg.n,
         cfg.w,
         cfg.r,
+        cfg.vnodes,
     )?);
     let state = AppState {
         store,

@@ -22,7 +22,7 @@ fn five_node_ids() -> Vec<&'static str> {
 }
 
 fn ring_order_ids(cluster: &TestCluster, key: &str) -> Vec<String> {
-    let ring = CoordinatorRing::from_roster(&cluster.roster, cluster.n).unwrap();
+    let ring = CoordinatorRing::from_roster(&cluster.roster, cluster.n, cluster.vnodes).unwrap();
     ring.ring_order_for_key(key.as_bytes())
         .unwrap()
         .into_iter()
@@ -151,7 +151,7 @@ async fn wait_until_node_has_keys(
 #[tokio::test]
 #[serial]
 async fn reconciliation_restores_keys_after_data_loss() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 
@@ -229,7 +229,7 @@ async fn reconciliation_restores_keys_after_data_loss() {
 #[tokio::test]
 #[serial]
 async fn hints_and_reconciliation_restore_all_keys_after_data_loss() {
-    let cluster = TestCluster::spawn(&five_node_ids(), 3, 2, 2)
+    let cluster = TestCluster::spawn_with_vnodes(&five_node_ids(), 3, 2, 2, 3)
         .await
         .expect("spawn cluster");
 

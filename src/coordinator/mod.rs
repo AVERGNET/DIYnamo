@@ -63,8 +63,9 @@ impl ReplicatedStore {
         n: usize,
         w: usize,
         r: usize,
+        vnodes: usize,
     ) -> anyhow::Result<Self> {
-        let ring = CoordinatorRing::from_roster(&roster, n)?;
+        let ring = CoordinatorRing::from_roster(&roster, n, vnodes)?;
 
         let events = gossip.subscribe();
         let handoff_task = handoff::HandoffTask {
@@ -74,6 +75,7 @@ impl ReplicatedStore {
             self_id: self_id.clone(),
             roster: roster.clone(),
             n,
+            vnodes,
             events,
         };
         let _handoff = handoff_task.start();
