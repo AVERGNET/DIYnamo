@@ -90,6 +90,21 @@ impl RocksDbStore {
             ))
         })
     }
+
+    /// Delete every key in the store. Used in tests to simulate data loss on restart.
+    pub fn clear_all(&self) -> anyhow::Result<()> {
+        let keys: Vec<Vec<u8>> = self
+            .db
+            .iterator(IteratorMode::Start)
+            .map(|item| item.map(|(k, _)| k.to_vec()).context("RocksDB iterator error"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for key in keys {
+            self.db
+                .delete(&key)
+                .with_context(|| format!("RocksDB delete failed for key {:?}", key))?;
+        }
+        Ok(())
+    }
 }
 
 impl StorageEngine for RocksDbStore {

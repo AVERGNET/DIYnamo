@@ -304,13 +304,55 @@ impl TestNode {
         Ok(())
     }
 
-    /// Whether `observer` sees `target` in its gossip live set.
+    /// Whether this node sees `target_id` in its gossip live set.
     pub async fn peer_sees_node(&self, target_id: &str) -> bool {
         self.gossip_handle()
             .online_members()
             .await
             .iter()
             .any(|m| m.id == target_id)
+    }
+
+    /// Read `target_id`'s startup UUID as seen by this node's gossip live set.
+    pub async fn peer_uuid(&self, target_id: &str) -> Option<[u8; 16]> {
+        self.gossip_handle()
+            .online_members()
+            .await
+            .into_iter()
+            .find(|m| m.id == target_id)
+            .map(|m| m.uuid)
+    }
+
+    /// Simulate total data loss: wipe the local RocksDB store.
+    pub fn wipe_local_data(&self) -> Result<()> {
+        self.local.clear_all()
+    }
+
+    /// Recover after data loss: wait until `observer` drops this node, wipe local
+    /// storage, restart gossip with a new UUID, and restore HTTP.
+    pub async fn recover_after_data_loss(
+        &self,
+        seed: SocketAddr,
+        observer: &TestNode,
+        wait_gone: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + wait_gone;
+        while observer.peer_sees_node(&self.id).await {
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "peer {} still sees {} after {:?}",
+                    observer.id,
+                    self.id,
+                    wait_gone
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        self.wipe_local_data()?;
+        self.restart_gossip(seed).await?;
+        self.recover_http();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
     }
 
     /// Take gossip down, wait until `observer` no longer sees this node, then
