@@ -12,6 +12,11 @@ name = "hint_handoff"
 path = "tests/hint_handoff.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "read_repair"
+path = "tests/read_repair.rs"
+required-features = ["test-utils"]
+
 [[bin]]
 name = "cli"
 path = "src/bin/cli.rs"
