@@ -23,7 +23,7 @@ The system is a distributed key-value store with sloppy-quorum replication, hint
 **`src/coordinator/`** owns distributed coordination.
 
 - `mod.rs` — `ReplicatedStore` implements `StorageEngine` and wraps `RocksDbStore`, `GossipNode`, `HintStore`, and `CoordinatorRing`. `put` runs sloppy-quorum writes: it attempts all N preferred nodes in parallel and, for any that fail, walks hint candidates in ring order until one accepts a hinted write; it returns success if `real_acks + hint_acks >= W`. `get` reads all N preferred nodes in parallel, requires R successful responses, picks the highest-timestamp winner (LWW), and fire-and-forgets `put_internal_versioned_bytes` to any stale replicas. `ReplicatedStore::new` spawns the `HandoffTask` and stores the `JoinHandle`.
-- `handoff.rs` — `HandoffTask` runs a background Tokio task driven by `GossipNode::subscribe()`. On every `Join` or `Update` event: (1) deliver all pending hints for that node via `KvClient::put_internal_bytes` and delete them on success; (2) if the node's UUID differs from the last-seen value, iterate `RocksDbStore::iter_all` and push every key whose preference list includes that node (UUID-change reconciliation for restarts and new nodes).
+- `handoff.rs` — `HandoffTask` runs a background Tokio task driven by `GossipNode::subscribe()`. On every `Join` or `Update` event: (1) spawn a task to deliver all pending hints for that node via `KvClient::put_internal_versioned_bytes` and delete them on success; (2) if the node's UUID differs from the last-seen value, abort any in-progress reconciliation for that node and spawn a fresh one. The reconciliation task snapshots `GossipNode::online_members()` once at startup, then iterates `RocksDbStore::iter_all` and pushes each key to the returning node only if this node is the designated sender — the first online preferred replica (excluding the returning node) in ring order. This eliminates the thundering herd while degrading gracefully when the primary is offline: if gossip has converged, the secondary takes over; if gossip is stale, read repair fills the gap on the next quorum read. The `CoordinatorRing` is wrapped in `Arc` so it can be shared with spawned tasks without cloning.
 
 **`src/client/`** contains `KvClient`, a reqwest-based HTTP client used by both the CLI and the coordinator for all peer-to-peer calls. Internal endpoints (`/internal/kv/{key}`, `/internal/kv-versioned/{key}`, `/internal/hint/{target_id}/{key}`) bypass quorum and operate directly on the local store or hint store.
 
@@ -44,7 +44,7 @@ src/
 │   └── printer.rs       run_live_set_printer, format_live_set
 ├── coordinator/
 │   ├── mod.rs           ReplicatedStore: quorum put/get, sloppy quorum, read repair
-│   └── handoff.rs       HandoffTask: hint delivery + UUID-change reconciliation
+│   └── handoff.rs       HandoffTask: spawned hint delivery + designated-sender reconciliation
 ├── client/
 │   └── http.rs          KvClient (put, get, put_internal_bytes, put_hint_bytes, …)
 ├── api/
@@ -84,9 +84,10 @@ server.rs ──► Arc<ReplicatedStore> ─────────────
           ┌─────────┼──────────────┐                      HandoffTask (background)
           │         │              │                       ├── EventSubscriber ◄── GossipNode
     local store   ring          hints                      ├── hints: Arc<HintStore>
-  RocksDbStore  CoordinatorRing  HintStore                 └── iter_all on RocksDbStore
-          │         │
-        RocksDB   hashring_coordinator
+  RocksDbStore  CoordinatorRing  HintStore                 ├── gossip: Arc<GossipNode>
+          │         │                                      ├── active_reconciliations map
+        RocksDB   hashring_coordinator                     └── iter_all + designated-sender filter
+         (Arc<CoordinatorRing> shared with reconciliation tasks)
                     │
               MembershipView
                     │
@@ -108,9 +109,10 @@ server.rs ──► Arc<ReplicatedStore> ─────────────
 3. LWW: take the `Some(v)` with the highest `v.timestamp`.
 4. Fire-and-forget `put_internal_versioned_bytes` (write-if-newer) to any replica that returned a stale or missing value.
 
-**Hint delivery (HandoffTask):**
-- Driven by gossip `Join` / `Update` events.
-- On each event: deliver all pending hints for that node; if UUID changed, push every locally-held key in that node's preference list.
+**Hint delivery and reconciliation (HandoffTask):**
+- Driven by gossip `Join` / `Update` events. The event loop itself does O(1) work per event — both hint delivery and reconciliation are spawned as independent Tokio tasks so a large backlog never stalls the loop.
+- On each event: spawn `deliver_hints` to replay all parked hints for that node (one `KvClient` per task, not one per hint).
+- If the node's UUID changed: abort any in-progress reconciliation task for that node (handles double-restarts), then spawn a fresh `reconcile_keys` task. The task snapshots `online_members()` once, then iterates the local store and pushes each key to the returning node only if this node is the designated sender (first online preferred replica excluding the returner). If the primary is offline and gossip has converged, the secondary is automatically promoted to designated sender.
 
 ---
 
@@ -123,6 +125,10 @@ server.rs ──► Arc<ReplicatedStore> ─────────────
 **Read repair uses write-if-newer, not unconditional put.** The receiving node's `/internal/kv-versioned` endpoint calls `put_if_newer`, which only writes if the incoming timestamp exceeds the stored one. This prevents a stale repair that was delayed in-flight from overwriting a newer external write that arrived in the interim.
 
 **UUID-change detection replaces explicit join events for reconciliation.** The `HandoffTask` treats any UUID change (new value or first appearance) as a signal to push the full key range for that node. This handles both new nodes joining and nodes that restarted with empty storage, without requiring explicit "I lost my data" signalling.
+
+**Designated-sender reconciliation avoids thundering herd.** When a node rejoins, every peer would naively push all keys whose preference list includes the returner — N-1 concurrent full-store scans hitting the recovering node simultaneously. Instead, each node independently computes whether it is the designated sender for each key: the first node in that key's preference list (excluding the returner) that appears in the online membership snapshot taken at task start. In the common case exactly one node pushes each key. If the primary is offline but gossip hasn't converged yet, the secondary may incorrectly defer — this bounded stale-view window is covered by read repair on the next quorum read.
+
+**Reconciliation tasks are abort-and-respawn, not queued.** `active_reconciliations` maps each node ID to its running reconciliation `JoinHandle`. A double-restart (node C changes UUID twice in rapid succession) aborts the first reconciliation task at its next await point and starts a fresh one. Keys already pushed by the aborted task are safe: `put_if_newer` on the receiver is idempotent and the new task will push the remainder.
 
 **Any node can coordinate.** There is no dedicated coordinator role. `server.rs` wraps `ReplicatedStore` directly, so whichever node receives the client request coordinates that operation. This matches Dynamo's design more closely than the seed-only alternative.
 
