@@ -27,19 +27,26 @@ use diynamo::test_support::TestCluster;
 // Experiment parameters
 // ---------------------------------------------------------------------------
 
-const CONCURRENCY_LEVELS: &[usize] = &[1, 2, 4, 8];
+// const CONCURRENCY_LEVELS: &[usize] = &[1];
+const CONCURRENCY_LEVELS: &[usize] = &[1, 2, 4, 8, 16, 32, 48];
 
 /// Discard ops during this window to warm up gossip, connection pools, and JIT.
 const WARMUP: Duration = Duration::from_secs(5);
 
 /// Record ops during this window.
-const MEASURE: Duration = Duration::from_secs(30);
+const MEASURE: Duration = Duration::from_secs(10);
 
 /// Fixed payload written on every PUT (~64 bytes).
 const VALUE: &str = "diynamo-eval-padding-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
 /// Keys pre-seeded for the GET pool so every GET hits a real value.
 const GET_POOL_SIZE: usize = 1_000;
+
+/// Seed at most this many keys concurrently.
+const SEED_BATCH_SIZE: usize = 32;
+
+/// Per-request timeout while seeding (quorum writes can be slow under load).
+const SEED_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 
@@ -64,7 +71,7 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 /// Workers run for `warmup + measure`; samples are recorded only during the
 /// measurement window.  Returns all recorded samples.
 async fn drive_load(
-    url: String,
+    base_url: String,
     op: &'static str,
     concurrency: usize,
     // For GET: pool of pre-seeded keys to read; ignored for PUT.
@@ -77,13 +84,13 @@ async fn drive_load(
     let mut tasks = tokio::task::JoinSet::new();
 
     for worker_idx in 0..concurrency {
-        let url = url.clone();
+        let base_url = base_url.clone();
         let key_pool = Arc::clone(&key_pool);
         let recording = Arc::clone(&recording);
         let stop = Arc::clone(&stop);
 
         tasks.spawn(async move {
-            let client = KvClient::new(&url).expect("build KvClient");
+            let client = KvClient::new(&base_url).expect("build KvClient");
             let mut samples: Vec<Sample> = Vec::new();
             let mut counter: u64 = 0;
             let mut err_count: u32 = 0;
@@ -168,11 +175,11 @@ async fn experiment_1_baseline_throughput_latency() {
         .await
         .expect("spawn 5-node cluster");
 
-    let coord_url = cluster.nodes[0].http_url.clone();
+    let base_url = cluster.nodes[0].http_url.clone();
 
     println!("\n┌─ Experiment 1: Baseline Throughput & Latency ─────────────────────────┐");
     println!("│  Cluster : 5 nodes, N=3, W=2, R=2, vnodes=3                          │");
-    println!("│  Coord   : {coord_url:<56}  │");
+    println!("│  Base URL: {base_url:<56}  │");
     println!(
         "│  Phases  : warmup={}s  measure={}s  per concurrency level            │",
         WARMUP.as_secs(),
@@ -190,7 +197,7 @@ async fn experiment_1_baseline_throughput_latency() {
         print!("  concurrency={concurrency:2}  warming up …");
         let _ = std::io::stdout().flush();
         let samples = drive_load(
-            coord_url.clone(),
+            base_url.clone(),
             "put",
             concurrency,
             Arc::new(vec![]),
@@ -209,23 +216,26 @@ async fn experiment_1_baseline_throughput_latency() {
     }
 
     // -----------------------------------------------------------------------
-    // 3. Seed GET key pool: 1 000 keys across all coordinators.
-    //    Use all nodes as coordinators to spread keys across the ring evenly.
+    // 3. Seed GET key pool: 1 000 keys.
     // -----------------------------------------------------------------------
     println!("\n── Seeding {} keys for GET pool ─────────────────────────────────────", GET_POOL_SIZE);
     {
-        let urls: Vec<String> = cluster.nodes.iter().map(|n| n.http_url.clone()).collect();
-        let mut seed = tokio::task::JoinSet::new();
-        for i in 0..GET_POOL_SIZE {
-            let url = urls[i % urls.len()].clone();
-            seed.spawn(async move {
-                let client = KvClient::new(&url).expect("seed client");
-                if let Err(e) = client.put(&format!("get-pool-{i}"), VALUE).await {
-                    eprintln!("[seed key={i}] {e:#}");
-                }
-            });
+        let seed_client = KvClient::new(&base_url)
+            .expect("seed client")
+            .with_request_timeout(SEED_REQUEST_TIMEOUT);
+        for batch_start in (0..GET_POOL_SIZE).step_by(SEED_BATCH_SIZE) {
+            let batch_end = (batch_start + SEED_BATCH_SIZE).min(GET_POOL_SIZE);
+            let mut seed = tokio::task::JoinSet::new();
+            for i in batch_start..batch_end {
+                let client = seed_client.clone();
+                seed.spawn(async move {
+                    if let Err(e) = client.put(&format!("get-pool-{i}"), VALUE).await {
+                        eprintln!("[seed key={i}] {e:#}");
+                    }
+                });
+            }
+            while seed.join_next().await.is_some() {}
         }
-        while seed.join_next().await.is_some() {}
     }
     // Allow quorum propagation and any background read-repair to settle.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -242,7 +252,7 @@ async fn experiment_1_baseline_throughput_latency() {
         print!("  concurrency={concurrency:2}  warming up …");
         let _ = std::io::stdout().flush();
         let samples = drive_load(
-            coord_url.clone(),
+            base_url.clone(),
             "get",
             concurrency,
             Arc::clone(&get_pool),

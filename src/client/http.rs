@@ -5,8 +5,8 @@ use std::time::Duration;
 use crate::api::types::{GetResponse, PutBody, PutVersionedBody};
 use crate::store::VersionedValue;
 
-/// Per-request timeout for all internal cluster calls.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+/// Default per-request timeout for cluster-internal RPCs.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Build a shared HTTP client for reuse across many requests.
 ///
@@ -14,8 +14,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 /// connection pool per host. Call this once per process / coordinator, not
 /// once per RPC.
 pub fn shared_http_client() -> Result<reqwest::Client> {
+    shared_http_client_with_timeout(DEFAULT_REQUEST_TIMEOUT)
+}
+
+/// Build a shared HTTP client with a custom request timeout.
+pub fn shared_http_client_with_timeout(timeout: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(timeout)
         .build()
         .context("failed to build HTTP client")
 }
@@ -25,6 +30,8 @@ pub fn shared_http_client() -> Result<reqwest::Client> {
 pub struct KvClient {
     base_url: String,
     http: reqwest::Client,
+    /// When set, overrides the underlying client's timeout on each request.
+    request_timeout: Option<Duration>,
 }
 
 impl KvClient {
@@ -32,11 +39,39 @@ impl KvClient {
         Ok(Self::with_http(base_url, shared_http_client()?))
     }
 
+    /// Build a client whose public API calls use `timeout` instead of the default.
+    pub fn with_timeout(base_url: impl AsRef<str>, timeout: Duration) -> Result<Self> {
+        Ok(Self {
+            base_url: base_url.as_ref().trim_end_matches('/').to_string(),
+            http: shared_http_client_with_timeout(timeout)?,
+            request_timeout: None,
+        })
+    }
+
+    /// Override the timeout used by subsequent `put` / `get` calls on this client.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
     /// Point at `base_url` using an already-constructed shared HTTP client.
     pub fn with_http(base_url: impl AsRef<str>, http: reqwest::Client) -> Self {
         Self {
             base_url: base_url.as_ref().trim_end_matches('/').to_string(),
             http,
+            request_timeout: None,
+        }
+    }
+
+    fn apply_timeout(
+        &self,
+        request: reqwest::RequestBuilder,
+        timeout: Option<Duration>,
+    ) -> reqwest::RequestBuilder {
+        if let Some(t) = timeout.or(self.request_timeout) {
+            request.timeout(t)
+        } else {
+            request
         }
     }
 
@@ -57,12 +92,22 @@ impl KvClient {
     }
 
     pub async fn put(&self, key: &str, value: &str) -> Result<()> {
+        self.put_with_timeout(key, value, None).await
+    }
+
+    pub async fn put_with_timeout(
+        &self,
+        key: &str,
+        value: &str,
+        timeout: Option<Duration>,
+    ) -> Result<()> {
         let response = self
-            .http
-            .put(self.kv_url(key))
-            .json(&PutBody {
-                value: value.to_string(),
-            })
+            .apply_timeout(
+                self.http.put(self.kv_url(key)).json(&PutBody {
+                    value: value.to_string(),
+                }),
+                timeout,
+            )
             .send()
             .await
             .context("put request failed")?;
@@ -79,9 +124,16 @@ impl KvClient {
     }
 
     pub async fn get(&self, key: &str) -> Result<GetResponse> {
+        self.get_with_timeout(key, None).await
+    }
+
+    pub async fn get_with_timeout(
+        &self,
+        key: &str,
+        timeout: Option<Duration>,
+    ) -> Result<GetResponse> {
         let response = self
-            .http
-            .get(self.kv_url(key))
+            .apply_timeout(self.http.get(self.kv_url(key)), timeout)
             .send()
             .await
             .context("get request failed")?;
