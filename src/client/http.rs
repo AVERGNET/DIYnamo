@@ -8,6 +8,18 @@ use crate::store::VersionedValue;
 /// Per-request timeout for all internal cluster calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Build a shared HTTP client for reuse across many requests.
+///
+/// `reqwest::Client` is cheap to clone (Arc internally) and maintains a
+/// connection pool per host. Call this once per process / coordinator, not
+/// once per RPC.
+pub fn shared_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("failed to build HTTP client")
+}
+
 /// HTTP client for a single node's KV HTTP API.
 #[derive(Clone)]
 pub struct KvClient {
@@ -17,14 +29,15 @@ pub struct KvClient {
 
 impl KvClient {
     pub fn new(base_url: impl AsRef<str>) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .context("failed to build HTTP client")?;
-        Ok(Self {
+        Ok(Self::with_http(base_url, shared_http_client()?))
+    }
+
+    /// Point at `base_url` using an already-constructed shared HTTP client.
+    pub fn with_http(base_url: impl AsRef<str>, http: reqwest::Client) -> Self {
+        Self {
             base_url: base_url.as_ref().trim_end_matches('/').to_string(),
             http,
-        })
+        }
     }
 
     fn kv_url(&self, key: &str) -> String {

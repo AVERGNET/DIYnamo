@@ -1,3 +1,3 @@
 mod http;
 
-pub use http::KvClient;
+pub use http::{shared_http_client, KvClient};

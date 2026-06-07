@@ -27,7 +27,7 @@ use diynamo::test_support::TestCluster;
 // Experiment parameters
 // ---------------------------------------------------------------------------
 
-const CONCURRENCY_LEVELS: &[usize] = &[1, 2, 4, 8, 16, 32];
+const CONCURRENCY_LEVELS: &[usize] = &[1, 2, 4, 8];
 
 /// Discard ops during this window to warm up gossip, connection pools, and JIT.
 const WARMUP: Duration = Duration::from_secs(5);

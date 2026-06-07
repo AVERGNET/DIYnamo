@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::client::KvClient;
+use crate::client::{shared_http_client, KvClient};
 use crate::cluster::ring::CoordinatorRing;
 use crate::cluster::GossipNode;
 use crate::config::ClusterMember;
@@ -47,6 +47,8 @@ pub struct ReplicatedStore {
     pub hints: Arc<HintStore>,
     self_id: String,
     ring: CoordinatorRing,
+    /// Shared across all internal replica RPCs on this node.
+    http: reqwest::Client,
     pub n: usize,
     pub w: usize,
     pub r: usize,
@@ -66,6 +68,7 @@ impl ReplicatedStore {
         vnodes: usize,
     ) -> anyhow::Result<Self> {
         let ring = CoordinatorRing::from_roster(&roster, n, vnodes)?;
+        let http = shared_http_client()?;
 
         let events = gossip.subscribe();
         let handoff_task = handoff::HandoffTask {
@@ -86,6 +89,7 @@ impl ReplicatedStore {
             hints,
             self_id,
             ring,
+            http,
             n,
             w,
             r,
@@ -113,9 +117,10 @@ impl StorageEngine for ReplicatedStore {
                 js.spawn(async move { (url, local.get(&k).await) });
             } else {
                 let k = key.to_vec();
+                let http = self.http.clone();
                 js.spawn(async move {
                     let r = async {
-                        let client = KvClient::new(&url)?;
+                        let client = KvClient::with_http(&url, http);
                         client.get_internal_versioned(&k).await
                     }
                     .await;
@@ -169,12 +174,12 @@ impl StorageEngine for ReplicatedStore {
                     let url = url.clone();
                     let k = k.clone();
                     let data = repair_data.clone();
+                    let http = self.http.clone();
                     tokio::spawn(async move {
-                        if let Ok(client) = KvClient::new(&url) {
-                            let _ = client
-                                .put_internal_versioned_bytes(&k, &data, winner_ts)
-                                .await;
-                        }
+                        let client = KvClient::with_http(&url, http);
+                        let _ = client
+                            .put_internal_versioned_bytes(&k, &data, winner_ts)
+                            .await;
                     });
                 }
             }
@@ -197,7 +202,7 @@ impl StorageEngine for ReplicatedStore {
 
         // --- Phase 1: parallel writes to all N preferred nodes ---
         // Each task returns (node_id, Result<()>). A timed-out or errored write
-        // is treated as a failure; the 1s timeout is baked into KvClient.
+        // is treated as a failure; timeout is configured on the shared HTTP client.
         let mut js: JoinSet<(String, Result<()>)> = JoinSet::new();
 
         for member in pref_list {
@@ -214,9 +219,10 @@ impl StorageEngine for ReplicatedStore {
                 let url = member.internal_base_url();
                 let k = key.to_vec();
                 let v = value.to_vec();
+                let http = self.http.clone();
                 js.spawn(async move {
                     let r = async {
-                        let client = KvClient::new(&url)?;
+                        let client = KvClient::with_http(&url, http);
                         client.put_internal_versioned_bytes(&k, &v, ts).await
                     }
                     .await;
@@ -257,8 +263,10 @@ impl StorageEngine for ReplicatedStore {
 
                 let url = candidate.internal_base_url();
                 let result = async {
-                    let client = KvClient::new(&url)?;
-                    client.put_hint_versioned_bytes(target_id, key, value, ts).await
+                    let client = KvClient::with_http(&url, self.http.clone());
+                    client
+                        .put_hint_versioned_bytes(target_id, key, value, ts)
+                        .await
                 }
                 .await;
 
