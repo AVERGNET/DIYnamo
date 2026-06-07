@@ -18,6 +18,11 @@ path = "tests/eval_quorum.rs"
 required-features = ["test-utils"]
 
 [[test]]
+name = "eval_recovery"
+path = "tests/eval_recovery.rs"
+required-features = ["test-utils"]
+
+[[test]]
 name = "hint_handoff"
 path = "tests/hint_handoff.rs"
 required-features = ["test-utils"]

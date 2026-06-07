@@ -307,13 +307,23 @@ impl TestNode {
 
     /// Start a fresh gossip instance on the same bind address and rejoin the cluster.
     pub async fn restart_gossip(&self, seed: SocketAddr) -> Result<()> {
+        self.restart_gossip_with_uuid(seed, uuid::Uuid::new_v4().into_bytes())
+            .await
+    }
+
+    /// Rejoin gossip advertising a specific startup UUID (e.g. preserve identity on return).
+    pub async fn restart_gossip_with_uuid(
+        &self,
+        seed: SocketAddr,
+        uuid: [u8; 16],
+    ) -> Result<()> {
         let join = if self.gossip_addr == seed {
             vec![]
         } else {
             vec![seed]
         };
         let meta = NodeMeta {
-            uuid: uuid::Uuid::new_v4().into_bytes(),
+            uuid,
             http_port: self.http_addr.port(),
         };
         let node = start_gossip_with_retry(&self.id, self.gossip_addr, &join, meta).await?;
@@ -367,6 +377,33 @@ impl TestNode {
         }
         self.wipe_local_data()?;
         self.restart_gossip(seed).await?;
+        self.recover_http();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    }
+
+    /// Recover after outage with local RocksDB intact and the same startup UUID.
+    /// Triggers hint delivery only (no UUID-change reconciliation).
+    pub async fn recover_after_outage_data_intact(
+        &self,
+        seed: SocketAddr,
+        observer: &TestNode,
+        preserve_uuid: [u8; 16],
+        wait_gone: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + wait_gone;
+        while observer.peer_sees_node(&self.id).await {
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "peer {} still sees {} after {:?}",
+                    observer.id,
+                    self.id,
+                    wait_gone
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        self.restart_gossip_with_uuid(seed, preserve_uuid).await?;
         self.recover_http();
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(())
