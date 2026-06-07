@@ -13,6 +13,11 @@ path = "tests/eval_baseline.rs"
 required-features = ["test-utils"]
 
 [[test]]
+name = "eval_quorum"
+path = "tests/eval_quorum.rs"
+required-features = ["test-utils"]
+
+[[test]]
 name = "hint_handoff"
 path = "tests/hint_handoff.rs"
 required-features = ["test-utils"]
