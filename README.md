@@ -110,6 +110,50 @@ cargo test --features test-utils --test migration
 
 > Tests are serialised (`serial_test`) because they bind real ports — run them sequentially, not with `-j`.
 
+## Evaluation Experiments
+
+Eval tests write CSVs to the workspace root and are run with `--nocapture` to see progress. Each spawns an in-process cluster via `test_support`; wall time varies from a few minutes to ~15 minutes.
+
+| # | Test | What it measures |
+|---|------|------------------|
+| 1 | `eval_baseline` | Throughput and latency on a healthy 5-node cluster (`N=3, W=2, R=2`) vs concurrency |
+| 2 | `eval_failure` | PUT/GET success % vs concurrency with 4/3/2 alive nodes (spread kills) |
+| 3a | `eval_recovery` (`experiment_3a_*`) | Hint-delivery recovery time vs hint count (data intact) |
+| 3b | `eval_recovery` (`experiment_3b_*`) | Reconciliation recovery time vs key count (data loss) |
+| 4 | `eval_quorum` | PUT/GET latency vs meaningful `(W, R)` pairs (`W+R > N`) on a 9-node cluster |
+
+```bash
+# Run one experiment
+cargo test --features test-utils --test eval_baseline -- --nocapture
+cargo test --features test-utils --test eval_failure -- --nocapture
+cargo test --features test-utils --test eval_recovery -- --nocapture
+cargo test --features test-utils --test eval_quorum -- --nocapture
+```
+
+### CSV outputs
+
+| Experiment | Files |
+|------------|-------|
+| 1 | `eval_baseline_samples.csv`, `eval_baseline_summary.csv` |
+| 2 | `eval_failure_samples.csv`, `eval_failure_summary.csv` |
+| 3a / 3b | `eval_recovery_3a.csv`, `eval_recovery_3b.csv` |
+| 4 | `eval_quorum_samples.csv`, `eval_quorum_summary.csv` |
+
+### Plotting
+
+Requires Python 3 with `pandas`, `matplotlib`, and `numpy`:
+
+```bash
+pip install pandas matplotlib numpy
+
+python eval/plot_baseline.py eval_baseline_samples.csv
+python eval/plot_failure.py eval_failure_summary.csv
+python eval/plot_recovery.py .
+python eval/plot_quorum.py eval_quorum_samples.csv
+```
+
+Plots are written next to the input CSV (or current directory for `plot_recovery.py`).
+
 ## Project Layout
 
 ```
@@ -134,7 +178,16 @@ config/
   node2.toml
   node3.toml
 tests/
+  eval_baseline.rs   Experiment 1
+  eval_failure.rs    Experiment 2
+  eval_recovery.rs   Experiments 3a / 3b
+  eval_quorum.rs     Experiment 4
   read_repair.rs
   hint_handoff.rs
   migration.rs
+eval/
+  plot_baseline.py
+  plot_failure.py
+  plot_recovery.py
+  plot_quorum.py
 ```
